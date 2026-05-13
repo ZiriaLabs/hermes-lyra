@@ -1,0 +1,33 @@
+{
+  "content_hash": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+  "effects": ["llm"],
+  "input_shape": {
+    "type": "structured",
+    "fields": [
+      {"name": "path", "shape": {"type": "string", "max_bytes": 256}},
+      {"name": "diff", "shape": {"type": "string", "max_bytes": 65536}}
+    ]
+  },
+  "name": "code-review-evolve",
+  "output_shape": {
+    "type": "structured",
+    "fields": [
+      {"name": "findings", "shape": {
+        "type": "list",
+        "max_items": 8,
+        "item": {
+          "type": "structured",
+          "fields": [
+            {"name": "severity", "shape": {"type": "u8",     "max_bytes": 1}},
+            {"name": "file",     "shape": {"type": "string", "max_bytes": 64}},
+            {"name": "line",     "shape": {"type": "u32",    "max_bytes": 4}},
+            {"name": "message",  "shape": {"type": "string", "max_bytes": 256}},
+            {"name": "category", "shape": {"type": "string", "max_bytes": 32}}
+          ]
+        }
+      }}
+    ]
+  },
+  "references": [],
+  "version": "0.1.1"
+}

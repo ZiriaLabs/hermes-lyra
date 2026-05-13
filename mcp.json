@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "lyra": {
+      "command": "lyra",
+      "args": ["mcp", "serve"],
+      "description": "Typed, self-verifying skill contracts over MCP. Five checks: skill_bind (embed a typed contract + proof into a SKILL.md's frontmatter), skill_verify (re-derive the proof locally), skill_refine (R1–R5 refinement check; pass or fail), skill_compose (composition check; pair or chain), skill_merge (atomic merge of producer + consumer). Speaks MCP 2025-06-18 over stdio."
+    }
+  }
+}

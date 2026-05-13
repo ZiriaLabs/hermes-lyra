@@ -1,0 +1,19 @@
+# Rust build artifacts
+/target/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor swap/backup
+*~
+*.swp
+*.swo
+
+# Temp / install scratch
+*.tmp
+.*.lyra-install.tmp.*

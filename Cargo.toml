@@ -1,0 +1,29 @@
+[package]
+name = "lyra-ref"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.83"
+description = "Reference library and CLI for the hermes-lyra skill-contract protocol."
+license = "Apache-2.0"
+repository = "https://github.com/ZiriaLabs/hermes-lyra"
+homepage = "https://github.com/ZiriaLabs/hermes-lyra"
+readme = "README.md"
+keywords = ["agent", "skill", "mcp", "deterministic", "receipt"]
+categories = ["cryptography", "data-structures"]
+
+[lib]
+name = "lyra_ref"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lyra"
+path = "src/bin/lyra.rs"
+
+[dependencies]
+uor-foundation     = "=0.4.2"
+uor-foundation-sdk = "=0.4.2"
+blake3             = { version = "1.5", default-features = false }
+
+[profile.release]
+lto = true
+opt-level = 3
