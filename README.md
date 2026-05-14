@@ -13,7 +13,7 @@
 <br />
 <div align="center">
   <a href="https://github.com/ZiriaLabs/hermes-lyra">
-    <img src="images/logo.svg" alt="hermes-lyra logo" width="120" height="120">
+    <img src="docs/images/logo.svg" alt="hermes-lyra logo" width="120" height="120">
   </a>
 
   <h3 align="center">hermes-lyra</h3>
@@ -75,7 +75,7 @@
 ## About The Project
 
 <div align="center">
-  <img src="images/demo.gif" alt="lyra self-check passes 7/7, then lyra refine rolls back a regression that widens its output shape" width="720">
+  <img src="docs/images/demo.gif" alt="lyra self-check passes 7/7, then lyra refine rolls back a regression that widens its output shape" width="720">
 </div>
 
 `hermes-lyra` gives any `SKILL.md` three things its prose alone can't carry:
@@ -263,13 +263,12 @@ Contributions are welcome. The bar is high: every new field, effect, or shape ad
 
 1. Fork the project
 2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Run `cargo test --release` — all 215 tests must pass
+3. Run `cargo test --release` — all 278 tests must pass
 4. Run `cargo fmt --all` and `cargo clippy --workspace -- -D warnings`
 5. Open a pull request
 
 Architectural changes belong in an Issue first. Any change to canonical bytes, the protocol identifier, or field semantics requires a protocol version bump.
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full guidelines.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

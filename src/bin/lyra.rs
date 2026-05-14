@@ -22,6 +22,9 @@ The five skill-contract checks (each accepts SKILL.md or descriptor JSON):
 Tooling:
   lyra install                                 register hermes-lyra in ~/.hermes/config.yaml (mcp_servers.lyra)
   lyra install --uninstall                     remove the registration
+  lyra cid      <SKILL.md or descriptor.json>  print content CID (multibase CIDv1)
+  lyra publish  <SKILL.md>                     emit [cid, bytes] for IPFS pinning
+                                               (stderr=header, stdout=canonical JSON)
   lyra mcp serve                               MCP server over stdio
   lyra demo refine                             built-in self-modification demo
   lyra self-check                              decentralized acceptance suite
@@ -51,6 +54,63 @@ fn main() {
         }
         return;
     }
+    // lyra cid <SKILL.md or descriptor.json>
+    //   Print the CIDv1 over the file's envelope bytes.
+    //
+    //   For a bound SKILL.md (one with a `proof:` line in its
+    //   frontmatter), this strips the proof line and hashes the rest
+    //   with BLAKE3-256, then wraps as CIDv1+raw+blake3. The result
+    //   matches the `output_cid` embedded in the proof line — i.e.,
+    //   the CID is self-verifying: re-derivable by anyone with the bytes.
+    //
+    //   For an unbound file (no proof line), the CID is over the raw
+    //   bytes verbatim. The same byte sequence → the same CID, every time.
+    //
+    //   Either way: matches `ipfs add --raw-leaves --cid-version=1
+    //   --hash=blake3 <file>` byte-for-byte.
+    if args.len() >= 3 && args[1] == "cid" {
+        let body = match std::fs::read_to_string(&args[2]) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("read {}: {e}", args[2]);
+                process::exit(2);
+            }
+        };
+        // Strip the proof line if present; otherwise hash the whole file.
+        let envelope = lyra_ref::bridge::strip_proof_line(&body).unwrap_or(body);
+        let cid = lyra_ref::cid::Cid::from_raw_blob(envelope.as_bytes()).to_string();
+        println!("{cid}");
+        return;
+    }
+
+    // lyra publish <SKILL.md>
+    //   Print, on stderr: cid + byte length (the receipt-like header).
+    //   Print, on stdout: the exact bytes whose CID is on stderr — the
+    //   envelope bytes (file minus proof line) for a bound file, or the
+    //   whole file for an unbound one.
+    //
+    //   The user pipes stdout into their pinning tool of choice:
+    //     lyra publish s.md > /tmp/blob && ipfs add --raw-leaves --cid-version=1 --hash=blake3 /tmp/blob
+    //   We deliberately do NOT call any network. Decentralization means
+    //   the user picks the transport.
+    if args.len() >= 3 && args[1] == "publish" {
+        let body = match std::fs::read_to_string(&args[2]) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("read {}: {e}", args[2]);
+                process::exit(2);
+            }
+        };
+        let envelope = lyra_ref::bridge::strip_proof_line(&body).unwrap_or(body);
+        let cid = lyra_ref::cid::Cid::from_raw_blob(envelope.as_bytes()).to_string();
+        // Header on stderr (stdout = bytes-to-pin).
+        eprintln!("cid: {cid}");
+        eprintln!("bytes: {}", envelope.len());
+        eprintln!("# pipe stdout into: ipfs add --raw-leaves --cid-version=1 --hash=blake3 -");
+        print!("{envelope}");
+        return;
+    }
+
     if args.len() >= 2 && args[1] == "install" {
         let uninstall = args[2..].iter().any(|a| a == "--uninstall" || a == "--remove");
         match lyra_ref::install::run(uninstall) {
@@ -323,7 +383,7 @@ fn main() {
                     process::exit(1);
                 }
                 println!("Receipt written to {receipt_path}");
-                println!("Output hash: {}", receipt.output_hash);
+                println!("Output CID: {}", receipt.output_cid);
             }
             Err(e) => {
                 eprintln!("score failed: {e}");
@@ -339,8 +399,8 @@ fn main() {
                 }
             };
             match verify(computation_id, input, &receipt) {
-                Ok(VerifyOutcome::Ok { output_hash, .. }) => {
-                    println!("Receipt valid. Output hash: {output_hash}");
+                Ok(VerifyOutcome::Ok { output_cid, .. }) => {
+                    println!("Receipt valid. Output CID: {output_cid}");
                     println!("VERIFY_OK");
                     process::exit(0);
                 }

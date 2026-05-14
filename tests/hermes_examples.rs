@@ -64,9 +64,10 @@ fn assert_descriptor_anchored(rel_path: &str) {
     let receipt = score("skill_interface_hash", &json)
         .unwrap_or_else(|e| panic!("{rel_path}: typed builder rejected: {e}"));
     // (2) Output hash is 64 hex chars (BLAKE3-256 over UOR-anchored canonical bytes).
-    assert_eq!(receipt.output_hash.len(), 64, "{rel_path}: output_hash not 32 bytes");
+    assert!(receipt.output_cid.starts_with('b'), "{rel_path}: output_cid not multibase-b CID");
+    assert!(receipt.output_cid.len() >= 59, "{rel_path}: output_cid shorter than minimum CID length");
     assert!(
-        receipt.output_hash.bytes().all(|b| b.is_ascii_hexdigit()),
+        receipt.output_cid.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7')),
         "{rel_path}: output_hash not hex"
     );
     // (3) Runtime ident is bound to this build (uor-foundation substrate).

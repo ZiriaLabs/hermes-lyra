@@ -123,7 +123,7 @@ fn certify_scaffolds_a_fresh_skill_md_from_descriptor_alone() {
     assert!(r.contains("\\\"proof\\\""), "must include proof: {r}");
     // The proof must carry the protocol identifier — without it the
     // artifact is not self-describing for a cold-start verifier.
-    assert!(r.contains("\\\"protocol\\\":\\\"hermes-lyra/0.2\\\""),
+    assert!(r.contains("\\\"protocol\\\":\\\"hermes-lyra/0.3\\\""),
         "proof must carry protocol field: {r}");
 }
 

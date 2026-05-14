@@ -1,10 +1,31 @@
-//! JSON-LD edge layer.  The ONLY place where JSON-LD enters the trust
-//! path.  Parser and serializer are hand-rolled (no new dependencies)
-//! with a fixed @context embedded at compile time.
+//! JSON-LD edge layer. The interchange format Lyra emits for
+//! cross-framework consumers and search-engine structured-data ingestors.
+//! JSON-LD is an **edge format**: it never enters the trust path (the
+//! envelope CID over the raw SKILL.md is authoritative). Parser and
+//! serializer are hand-rolled (no new dependencies) with a fixed
+//! @context embedded at compile time.
 //!
-//! The typed Rust `SkillDescriptor` is the source of truth; JSON-LD is
-//! the interchange format.  Every `SkillDescriptor` must round-trip:
-//! deserialize(serialize(d)) == d.
+//! ## Schema.org alignment (Depth 1: vocabulary borrow)
+//!
+//! Lyra descriptors render as [`schema:SoftwareApplication`] — they
+//! describe pieces of software (skills) with name, version, and a typed
+//! contract. We borrow schema.org's vocabulary for the universal fields
+//! (`schema:name`, `schema:softwareVersion`) so search engines, RDF
+//! triplestores, and JSON-LD-aware LLM retrieval pipelines understand
+//! the output natively. Lyra-specific fields (typed shapes, effects,
+//! content hash, references, schema CID) stay under the `lyra:`
+//! namespace because schema.org has no native vocabulary for them.
+//!
+//! This is **Depth 1**: borrow vocabulary, keep our type system.
+//! Depth 3 (schema.org as our meta-schema) is deliberately not done —
+//! it would trade `ConstrainedTypeShape`'s compile-time guarantees for
+//! schema.org's loose `expectedType` model.
+//!
+//! [`schema:SoftwareApplication`]: https://schema.org/SoftwareApplication
+//!
+//! The typed Rust `SkillDescriptor` remains the source of truth; JSON-LD
+//! is the interchange format. Every `SkillDescriptor` must round-trip:
+//! `from_jsonld(to_jsonld(d)) == d`.
 
 use crate::descriptor::{
     DescriptorBuildError, EffectKind, NamedField, Shape, SkillDescriptor,
@@ -13,6 +34,16 @@ use crate::descriptor::{
 // -- @context (fixed, never fetched from network) --
 
 const CONTEXT_KEY: &str = "@context";
+
+/// schema.org namespace prefix. Borrowed for universal fields.
+const SCHEMA_NS: &str = "https://schema.org/";
+/// Lyra ontology namespace prefix. Owns everything schema.org does not.
+const LYRA_NS: &str = "https://lyra-protocol.org/ontology/v0.1/";
+
+/// Top-level schema.org type a Lyra skill descriptor renders as.
+/// A skill is a typed, versioned piece of software with a contract;
+/// `SoftwareApplication` is the closest schema.org class.
+const RENDER_AS_TYPE: &str = "schema:SoftwareApplication";
 
 // -- Minimal value enum for our parser ---------------------------
 
@@ -30,23 +61,61 @@ enum Value {
 
 pub fn to_jsonld(desc: &SkillDescriptor) -> String {
     let mut obj = Vec::new();
-    // @context
+
+    // @context — bind the two namespaces we use.
+    //   schema: → universal vocabulary (name, version, type)
+    //   lyra:   → Lyra-specific concepts (typed shapes, effects,
+    //             content hash, references, schema CID)
     let mut ctx = Vec::new();
-    ctx.push(("type".into(), Value::Str("lyra:SkillDescriptor".into())));
+    ctx.push(("schema".into(), Value::Str(SCHEMA_NS.into())));
+    ctx.push(("lyra".into(), Value::Str(LYRA_NS.into())));
     obj.push((CONTEXT_KEY.into(), Value::Obj(ctx)));
-    obj.push(("type".into(), Value::Str("lyra:SkillDescriptor".into())));
-    obj.push(("name".into(), Value::Str(desc.name().into())));
-    obj.push(("version".into(), Value::Str(desc.version().into())));
-    obj.push(("content_hash".into(), Value::Str(desc.content_hash_hex())));
-    obj.push(("input_shape".into(), value_for_shape(desc.input_shape())));
-    obj.push(("output_shape".into(), value_for_shape(desc.output_shape())));
+
+    // @type — render as schema:SoftwareApplication. A skill is a typed,
+    // versioned piece of software with a contract; this is the closest
+    // schema.org class. Outside consumers (Google rich-results, RDF
+    // stores, JSON-LD-aware retrieval) recognize it immediately.
+    obj.push(("@type".into(), Value::Str(RENDER_AS_TYPE.into())));
+
+    // Universal fields → schema.org vocabulary.
+    obj.push(("schema:name".into(), Value::Str(desc.name().into())));
     obj.push((
-        "effects".into(),
-        Value::Arr(desc.effects().iter().map(|e| Value::Str(effect_str(*e).into())).collect()),
+        "schema:softwareVersion".into(),
+        Value::Str(desc.version().into()),
+    ));
+
+    // Lyra-specific fields → lyra: namespace.
+    // The schema CID anchors which Lyra schema this descriptor instantiates.
+    obj.push(("lyra:schema".into(), Value::Str(desc.schema().into())));
+    obj.push((
+        "lyra:contentHash".into(),
+        Value::Str(desc.content_hash_hex()),
     ));
     obj.push((
-        "references".into(),
-        Value::Arr(desc.references().iter().map(|r| Value::Str(r.clone())).collect()),
+        "lyra:inputShape".into(),
+        value_for_shape(desc.input_shape()),
+    ));
+    obj.push((
+        "lyra:outputShape".into(),
+        value_for_shape(desc.output_shape()),
+    ));
+    obj.push((
+        "lyra:effects".into(),
+        Value::Arr(
+            desc.effects()
+                .iter()
+                .map(|e| Value::Str(effect_str(*e).into()))
+                .collect(),
+        ),
+    ));
+    obj.push((
+        "lyra:references".into(),
+        Value::Arr(
+            desc.references()
+                .iter()
+                .map(|r| Value::Str(r.clone()))
+                .collect(),
+        ),
     ));
     render_obj(&obj)
 }
@@ -399,21 +468,37 @@ pub fn from_jsonld(s: &str) -> Result<SkillDescriptor, DescriptorBuildError> {
         return Err(DescriptorBuildError::ShapeValidationError("root must be object".into()));
     };
 
-    let name = get_str(&obj, "name").ok_or(DescriptorBuildError::ShapeValidationError(
-        "missing name".into(),
-    ))?;
-    let version = get_str(&obj, "version").ok_or(DescriptorBuildError::ShapeValidationError(
-        "missing version".into(),
-    ))?;
-    let content_hash = get_str(&obj, "content_hash").ok_or(DescriptorBuildError::ShapeValidationError(
-        "missing content_hash".into(),
-    ))?;
+    // schema.org-aliased universal fields, with the bare key as a
+    // tolerant fallback. The bare-key path exists ONLY so descriptors
+    // hand-typed by a user without the schema: prefix still parse;
+    // round-trip from `to_jsonld` always emits the namespaced form.
+    let name = get_str(&obj, "schema:name")
+        .or_else(|| get_str(&obj, "name"))
+        .ok_or(DescriptorBuildError::ShapeValidationError(
+            "missing schema:name".into(),
+        ))?;
+    let version = get_str(&obj, "schema:softwareVersion")
+        .or_else(|| get_str(&obj, "version"))
+        .ok_or(DescriptorBuildError::ShapeValidationError(
+            "missing schema:softwareVersion".into(),
+        ))?;
 
-    let input_shape = get_val(&obj, "input_shape")
+    // Lyra-namespaced fields, with the bare key as the same tolerant fallback.
+    let content_hash = get_str(&obj, "lyra:contentHash")
+        .or_else(|| get_str(&obj, "content_hash"))
+        .ok_or(DescriptorBuildError::ShapeValidationError(
+            "missing lyra:contentHash".into(),
+        ))?;
+    let schema_cid = get_str(&obj, "lyra:schema")
+        .or_else(|| get_str(&obj, "schema"));
+
+    let input_shape = get_val(&obj, "lyra:inputShape")
+        .or_else(|| get_val(&obj, "input_shape"))
         .map(parse_shape_value)
         .transpose()
         .map_err(|e| DescriptorBuildError::ShapeValidationError(e))?;
-    let output_shape = get_val(&obj, "output_shape")
+    let output_shape = get_val(&obj, "lyra:outputShape")
+        .or_else(|| get_val(&obj, "output_shape"))
         .map(parse_shape_value)
         .transpose()
         .map_err(|e| DescriptorBuildError::ShapeValidationError(e))?;
@@ -423,6 +508,9 @@ pub fn from_jsonld(s: &str) -> Result<SkillDescriptor, DescriptorBuildError> {
         .version(version)
         .content_hash_hex(content_hash);
 
+    if let Some(sc) = schema_cid {
+        builder = builder.schema(sc);
+    }
     if let Some(is) = input_shape {
         builder = builder.input_shape(is);
     }
@@ -430,7 +518,8 @@ pub fn from_jsonld(s: &str) -> Result<SkillDescriptor, DescriptorBuildError> {
         builder = builder.output_shape(os);
     }
 
-    if let Some(effects_arr) = get_arr(&obj, "effects") {
+    let effects_arr = get_arr(&obj, "lyra:effects").or_else(|| get_arr(&obj, "effects"));
+    if let Some(effects_arr) = effects_arr {
         for ev in effects_arr {
             if let Value::Str(e) = ev {
                 let eff = match e.as_str() {
@@ -448,7 +537,8 @@ pub fn from_jsonld(s: &str) -> Result<SkillDescriptor, DescriptorBuildError> {
         }
     }
 
-    if let Some(refs_arr) = get_arr(&obj, "references") {
+    let refs_arr = get_arr(&obj, "lyra:references").or_else(|| get_arr(&obj, "references"));
+    if let Some(refs_arr) = refs_arr {
         for rv in refs_arr {
             if let Value::Str(r) = rv {
                 builder = builder.reference(r.clone());
@@ -496,20 +586,20 @@ mod tests {
 
     #[test]
     fn parse_with_references() {
-        // S4: references are pinned `name@<64-hex>` strings.
-        let pinned = format!("web-search@{}", "ff".repeat(32));
+        // References are bare CIDv1 strings.
+        let cid = "bafkr4idtjwypfi4rrrhkzciuvexfxehrv4zgvnylzxgr7lhuyimcfdmene".to_string();
         let desc = SkillDescriptor::builder()
             .name("research-tool")
             .version("1.0.0")
             .content_hash_hex("aabbccdd".repeat(8).as_str())
             .input_shape(Shape::String { max_bytes: 512 })
             .output_shape(Shape::String { max_bytes: 2048 })
-            .reference(pinned.clone())
+            .reference(cid.clone())
             .build()
             .unwrap();
 
         let jsonld = to_jsonld(&desc);
         let parsed = from_jsonld(&jsonld).expect("parse should succeed");
-        assert_eq!(parsed.references(), &[pinned]);
+        assert_eq!(parsed.references(), &[cid]);
     }
 }

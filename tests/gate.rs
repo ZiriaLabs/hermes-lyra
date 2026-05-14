@@ -24,7 +24,7 @@ fn assert_gated(computation: &str, input: &str) -> String {
     let outcome = verify(computation, input, &receipt)
         .unwrap_or_else(|e| panic!("verify {computation} failed: {e}"));
     match outcome {
-        VerifyOutcome::Ok { output_hash, .. } => output_hash,
+        VerifyOutcome::Ok { output_cid, .. } => output_cid,
         VerifyOutcome::ContentMismatch {
             expected,
             actual_in_receipt,
@@ -85,17 +85,18 @@ fn compose_input(producer_out: &str, consumer_in: &str) -> String {
 }
 
 // blake3("COMPATIBLE") and blake3("INCOMPATIBLE:...") pre-images. The
-// `compose_interfaces` computation hashes a literal status string, so
-// the receipt's output_hash distinguishes the two outcomes.
-// BLAKE3-256 of (LYRA_RUNTIME_IDENT || 0x00 || "compose_interfaces" || 0x00 || b"COMPATIBLE").
-// Folding the runtime ident makes the seal substrate-bound; this constant
-// must change whenever LYRA_RUNTIME_IDENT does.
-const COMPATIBLE_HASH: &str = "9175ef568d458732eec490b34786bc01d7651f4518218260c0e73738e7a05649";
+// `compose_interfaces` computation produces a CID-encoded sentinel
+// for the COMPATIBLE outcome (and a different CID for any INCOMPATIBLE
+// reason string). Under v0.3 content addressing, the canonical bytes
+// hashed are: LYRA_PROTOCOL_ID_PREFIX || 0x00 || "compose_interfaces"
+// || 0x00 || b"COMPATIBLE". The runtime ident is NOT folded in, so
+// this CID is stable across crate versions within the v0.3.x line.
+const COMPATIBLE_CID: &str = "bagaaihraqczovynqwdfh7ngqozy4obcziqx53sufguoqi56x3htdwdxiztza";
 
 fn assert_compatible(producer_out: &str, consumer_in: &str) {
     let h = assert_gated("compose_interfaces", &compose_input(producer_out, consumer_in));
     assert_eq!(
-        h, COMPATIBLE_HASH,
+        h, COMPATIBLE_CID,
         "expected COMPATIBLE for producer={producer_out} consumer={consumer_in}, got {h}",
     );
 }
@@ -103,7 +104,7 @@ fn assert_compatible(producer_out: &str, consumer_in: &str) {
 fn assert_incompatible(producer_out: &str, consumer_in: &str) {
     let h = assert_gated("compose_interfaces", &compose_input(producer_out, consumer_in));
     assert_ne!(
-        h, COMPATIBLE_HASH,
+        h, COMPATIBLE_CID,
         "expected INCOMPATIBLE for producer={producer_out} consumer={consumer_in}, got COMPATIBLE",
     );
 }
@@ -327,9 +328,9 @@ fn gate_property_tampered_receipt_rejected() {
     // pass (the trace is intact), but content re-execution will not
     // match.
     let mut tampered = receipt.clone();
-    let mut bytes: Vec<u8> = tampered.output_hash.into_bytes();
+    let mut bytes: Vec<u8> = tampered.output_cid.into_bytes();
     bytes[0] ^= 0x01;
-    tampered.output_hash = String::from_utf8(bytes).unwrap();
+    tampered.output_cid = String::from_utf8(bytes).unwrap();
 
     let outcome = verify("skill_interface_hash", &desc, &tampered).expect("verify call ok");
     match outcome {
@@ -386,21 +387,22 @@ fn merkle_manifest_order_independent() {
 
 #[test]
 fn skill_reference_resolve_succeeds_when_present() {
-    // S4: references are pinned `name@<64-hex>`. Both name and content_hash
-    // must match a manifest entry.
-    let http_hash = "aa".repeat(32);
+    // References are bare CIDv1 strings. Manifest entries are {name, cid}
+    // pairs; matching is by CID alone (the name field is metadata for
+    // the caller).
+    let http_cid = "bafkr4idtjwypfi4rrrhkzciuvexfxehrv4zgvnylzxgr7lhuyimcfdmene";
     let input = format!(
-        r#"{{"manifest":[{{"content_hash":"{http_hash}","name":"http-client"}}],"skill":{{"content_hash":"10b5b447","effects":["web_read"],"input_shape":{{"type":"string","max_bytes":256}},"output_shape":{{"type":"string","max_bytes":4096}},"references":["http-client@{http_hash}"],"name":"web-search","version":"1.0.0"}}}}"#
+        r#"{{"manifest":[{{"cid":"{http_cid}","name":"http-client"}}],"skill":{{"content_hash":"10b5b447","effects":["web_read"],"input_shape":{{"type":"string","max_bytes":256}},"output_shape":{{"type":"string","max_bytes":4096}},"references":["{http_cid}"],"name":"web-search","version":"1.0.0"}}}}"#
     );
     assert_gated("skill_reference_resolve", &input);
 }
 
 #[test]
 fn skill_reference_resolve_rejects_missing_reference() {
-    // Reference to a skill not in the manifest → must error.
-    let missing_hash = "ff".repeat(32);
+    // Reference to a CID not in the manifest → must error.
+    let orphan_cid = "bafkr4ihjjst6s2zemp7qmufq7c26dg67lqnm3wruko2mdnaeqtpppktbo4";
     let input = format!(
-        r#"{{"manifest":[],"skill":{{"content_hash":"10b5b447","effects":["web_read"],"input_shape":{{"type":"string","max_bytes":256}},"output_shape":{{"type":"string","max_bytes":4096}},"references":["nonexistent-skill@{missing_hash}"],"name":"web-search","version":"1.0.0"}}}}"#
+        r#"{{"manifest":[],"skill":{{"content_hash":"10b5b447","effects":["web_read"],"input_shape":{{"type":"string","max_bytes":256}},"output_shape":{{"type":"string","max_bytes":4096}},"references":["{orphan_cid}"],"name":"web-search","version":"1.0.0"}}}}"#
     );
     assert_rejected("skill_reference_resolve", &input);
 }

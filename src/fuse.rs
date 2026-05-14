@@ -95,11 +95,11 @@ impl FuseResult {
                 }
                 effs.push(']');
                 format!(
-                    r#"{{"status":"fused","skill_md":"{}","descriptor":{},"effects_union":{},"proof":{{"output_hash":"{}","runtime":"{}"}}}}"#,
+                    r#"{{"status":"fused","skill_md":"{}","descriptor":{},"effects_union":{},"proof":{{"output_cid":"{}","runtime":"{}"}}}}"#,
                     json_escape(skill_md),
                     descriptor_json,
                     effs,
-                    proof.output_hash,
+                    proof.output_cid,
                     json_escape(&proof.runtime),
                 )
             }
@@ -184,6 +184,18 @@ pub fn fuse_skills(
     let fused_name = derive_fused_name(name_override, &producer, &consumer)?;
     let fused_hash = derive_fused_content_hash(&producer, &consumer);
 
+    // 3b. Compute parent CIDs. A reference is the **envelope CID** of the
+    //     parent SKILL.md: every byte except the proof line. For a fully
+    //     bound parent (SKILL.md with a `proof:` line), this matches both
+    //     `lyra cid` and the CID embedded in the parent's own proof.
+    //     For a bare descriptor passed in, this is the CID of those exact
+    //     bytes — still a valid content address, just not round-trippable
+    //     through `lyra cid` (because `lyra cid` operates on SKILL.md
+    //     files, not raw JSON). Either way: one CID per parent, no name
+    //     prefix, no parallel naming scheme.
+    let producer_cid = envelope_cid_of(producer_input);
+    let consumer_cid = envelope_cid_of(consumer_input);
+
     // 4. Build the canonical JSON form of the fused descriptor. Key
     //    order is alphabetical — matches Lyra's existing canonical
     //    examples and keeps `version` last (the parser's last-key
@@ -194,6 +206,8 @@ pub fn fuse_skills(
         &fused_name,
         &producer,
         &consumer,
+        &producer_cid,
+        &consumer_cid,
     );
 
     // 5. Re-validate by round-tripping through the typed parser. Two
@@ -312,6 +326,8 @@ fn build_fused_descriptor_json(
     name: &str,
     p: &SkillDescriptor,
     c: &SkillDescriptor,
+    producer_cid: &str,
+    consumer_cid: &str,
 ) -> String {
     let mut out = String::with_capacity(512);
     out.push('{');
@@ -329,7 +345,7 @@ fn build_fused_descriptor_json(
     out.push_str(&shape_to_json(c.output_shape()));
     out.push(',');
     out.push_str(r#""references":"#);
-    out.push_str(&references_json_array(p, c));
+    out.push_str(&references_json_array(producer_cid, consumer_cid));
     out.push(',');
     out.push_str(&format!(r#""version":"0.1.0""#));
     out.push('}');
@@ -359,16 +375,25 @@ fn effects_json_array(p: &SkillDescriptor, c: &SkillDescriptor) -> String {
     out
 }
 
-/// References as `["name@hash", "name@hash"]`. Order is producer then
-/// consumer — preserves the *direction* of the fusion, which a sorter
-/// would erase. Re-fusing the same pair in the other direction
-/// produces a different reference order and (because the content_hash
-/// also includes ordering) a different content_hash, which is
-/// correct: `fuse(a,b) ≠ fuse(b,a)` semantically.
-fn references_json_array(p: &SkillDescriptor, c: &SkillDescriptor) -> String {
-    let p_ref = format!("{}@{}", p.name(), hex_encode_32(p.content_hash()));
-    let c_ref = format!("{}@{}", c.name(), hex_encode_32(c.content_hash()));
-    format!(r#"["{}","{}"]"#, p_ref, c_ref)
+/// References as `["<producer-cid>","<consumer-cid>"]`. Order is producer
+/// then consumer — preserves the *direction* of the fusion, which a sorter
+/// would erase. Re-fusing the same pair in the other direction produces a
+/// different reference order and (because content_hash also includes
+/// ordering) a different content_hash, which is correct: `fuse(a,b) ≠
+/// fuse(b,a)` semantically.
+fn references_json_array(producer_cid: &str, consumer_cid: &str) -> String {
+    format!(r#"["{}","{}"]"#, producer_cid, consumer_cid)
+}
+
+/// Compute the envelope CID of an input string. For a SKILL.md with a
+/// proof line, this is `lyra cid` semantics (strip the proof line, hash
+/// the rest). For a bare descriptor JSON or any other text, this is the
+/// CID of the exact bytes — `strip_proof_line` returns `None` and we
+/// fall back to hashing the whole input. Either way: one CID per input,
+/// stable across re-runs, derivable from the bytes alone.
+fn envelope_cid_of(input: &str) -> String {
+    let envelope = crate::bridge::strip_proof_line(input).unwrap_or_else(|| input.to_string());
+    crate::cid::Cid::from_raw_blob(envelope.as_bytes()).to_string()
 }
 
 // -- shape serializer: typed Shape → canonical JSON --
@@ -487,7 +512,7 @@ mod tests {
         assert!(md.contains("\ncontract: "), "missing contract: key: {md}");
         assert!(md.contains("\nproof:"), "missing proof: key: {md}");
         assert!(md.contains(&json), "contract value must equal fused descriptor JSON");
-        assert_eq!(proof.output_hash.len(), 64);
+        assert!(proof.output_cid.starts_with("b") && proof.output_cid.len() >= 59);
     }
 
     #[test]
@@ -531,9 +556,18 @@ mod tests {
     #[test]
     fn fuse_pins_parents_in_references() {
         let (_, json, _) = fuse_ok(PRODUCER, CONSUMER);
-        // Both parents must appear as <name>@<64-hex>.
-        assert!(json.contains(r#""hermes-greet@a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0""#));
-        assert!(json.contains(r#""greeting-printer@b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0""#));
+        // Both parents must appear as bare CIDv1 strings. The exact CID
+        // depends on the raw descriptor bytes (PRODUCER/CONSUMER constants),
+        // so we assert the shape and prefix rather than exact bytes —
+        // multiformats canonical 'b' + base32-lower starts with "bafk".
+        let refs = json.split(r#""references":"#).nth(1).expect("references field");
+        let refs = &refs[..refs.find(']').expect("close bracket") + 1];
+        // Should look like ["bafk...", "bafk..."]
+        assert!(refs.starts_with(r#"["bafk"#), "first ref must be a CIDv1: {refs}");
+        let bafk_count = refs.matches("\"bafk").count();
+        assert_eq!(bafk_count, 2, "expected two CID references, got: {refs}");
+        // And critically: NO @-sign anywhere (we dropped name@hash).
+        assert!(!refs.contains('@'), "references must not contain '@': {refs}");
     }
 
     #[test]
@@ -542,7 +576,7 @@ mod tests {
         let (md_b, json_b, proof_b) = fuse_ok(PRODUCER, CONSUMER);
         assert_eq!(md_a, md_b);
         assert_eq!(json_a, json_b);
-        assert_eq!(proof_a.output_hash, proof_b.output_hash);
+        assert_eq!(proof_a.output_cid, proof_b.output_cid);
     }
 
     #[test]

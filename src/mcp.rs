@@ -305,11 +305,10 @@ fn tool_certify(id: &str, args: &std::collections::HashMap<String, String>) -> S
         Ok((upgraded, proof)) => tool_ok(
             id,
             &format!(
-                r#"{{"status":"certified","skill_md":"{}","proof":{{"protocol":"{}","spec_uri":"{}","output_hash":"{}","runtime":"{}"}}}}"#,
+                r#"{{"status":"certified","skill_md":"{}","proof":{{"protocol":"{}","output_cid":"{}","runtime":"{}"}}}}"#,
                 json_escape(&upgraded),
                 proof.protocol,
-                json_escape(&proof.spec_uri),
-                proof.output_hash,
+                proof.output_cid,
                 json_escape(&proof.runtime),
             ),
         ),

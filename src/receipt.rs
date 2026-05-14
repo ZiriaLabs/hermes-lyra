@@ -1,28 +1,36 @@
 //! Receipt: a JSON envelope binding computation inputs, outputs, and a
-//! sealed proof of execution.
+//! content-addressed proof of execution.
 //!
 //! The on-disk format is a single-line JSON object with exactly four
 //! string fields, in alphabetical key order:
 //!
 //! ```json
-//! {"computation_id":"...","input":"...","output_hash":"...","runtime":"..."}
+//! {"computation_id":"...","input":"...","output_cid":"bafy...","runtime":"..."}
 //! ```
 //!
-//! `runtime` identifies the implementation + substrate version that
-//! produced the receipt (e.g. `"hermes-lyra/0.2.0+uor-foundation/0.4.2"`).
-//! It is folded into the canonical bytes that produced `output_hash`, so
-//! receipts produced under different substrate versions are visibly distinct.
+//! `output_cid` is the v0.3+ content anchor — a multibase string-form
+//! CIDv1 over the canonical input bytes for `computation_id`. The bytes
+//! actually hashed are
 //!
-//! **Earlier versions also carried a `trace_b64` field** holding a
-//! serialized UOR pipeline trace. That field was removed because, at the
-//! pipeline configuration Lyra uses, the trace's content fingerprint is
-//! a function of the term-arena *structure*, not of input values — the
-//! same trace bytes were emitted for every receipt. The wire field gave
-//! the false impression of an input-bound cryptographic seal. Forgery
-//! resistance now rests solely on BLAKE3 over `output_hash` + the
-//! `runtime` identifier; the typed `gate::Attestation` still exposes a
-//! `Certified<...>` value as a *type-level* structural witness for
-//! in-process Rust callers.
+//! ```text
+//! LYRA_PROTOCOL_ID_PREFIX || 0x00 || computation_id || 0x00 || canonical_input_bytes
+//! ```
+//!
+//! so two implementations that produce the same canonical inputs produce
+//! byte-identical `output_cid` values — the addressing is independent of
+//! crate version or substrate version.
+//!
+//! `runtime` identifies the implementation + substrate that produced
+//! this receipt (e.g. `"hermes-lyra/0.3.0+uor-foundation/0.4.2"`). It is
+//! preserved on the envelope as a compatibility *gate* (a verifier
+//! rejects unknown runtime idents with `unsupported_protocol`) but is
+//! *not* folded into the hash itself — pure content addressing.
+//!
+//! **Earlier versions (v0.2 and below)** carried `output_hash` instead
+//! (`BLAKE3(runtime || 0x00 || label || 0x00 || bytes)` hex-encoded).
+//! That field is no longer accepted; a v0.3 parser rejects any receipt
+//! containing `output_hash` so a partial migration cannot silently slip
+//! through. v0.2 receipts must be re-bound with `lyra bind`.
 //!
 //! Strings are escaped with the standard JSON escape set (`\"`, `\\`,
 //! `\n`, `\r`, `\t`); no `\uXXXX` escapes are emitted.
@@ -37,11 +45,11 @@ use std::io;
 pub struct Receipt {
     pub computation_id: String,
     pub input: String,
-    /// Hex-encoded BLAKE3-256 of the computation's deterministic output.
-    /// This is the receipt's content binding.
-    pub output_hash: String,
+    /// Canonical string-form CIDv1 over the framed canonical input.
+    /// See [`crate::cid::Cid`] for the layout.
+    pub output_cid: String,
     /// Identifier of the implementation + substrate that produced this
-    /// receipt. See [`crate::LYRA_RUNTIME_IDENT`].
+    /// receipt. Gated at verify time. See [`crate::LYRA_RUNTIME_IDENT`].
     pub runtime: String,
 }
 
@@ -49,8 +57,11 @@ impl Receipt {
     /// Encode as a single-line JSON object.
     pub fn to_json(&self) -> String {
         let mut out = String::with_capacity(
-            self.computation_id.len() + self.input.len() + self.output_hash.len()
-                + self.runtime.len() + 64,
+            self.computation_id.len()
+                + self.input.len()
+                + self.output_cid.len()
+                + self.runtime.len()
+                + 64,
         );
         out.push('{');
         out.push_str("\"computation_id\":");
@@ -59,8 +70,8 @@ impl Receipt {
         out.push_str("\"input\":");
         write_json_string(&mut out, &self.input);
         out.push(',');
-        out.push_str("\"output_hash\":");
-        write_json_string(&mut out, &self.output_hash);
+        out.push_str("\"output_cid\":");
+        write_json_string(&mut out, &self.output_cid);
         out.push(',');
         out.push_str("\"runtime\":");
         write_json_string(&mut out, &self.runtime);
@@ -70,10 +81,9 @@ impl Receipt {
 
     /// Parse the receipt from its on-disk JSON form.
     ///
-    /// This is a minimal, focused parser: it accepts exactly the
-    /// receipt shape (`{"computation_id":"...","input":"...","output_hash":"...","trace_b64":"..."}`)
-    /// with the four fields in order. It correctly handles strings
-    /// containing commas, quotes, braces, and the standard escape set.
+    /// Accepts exactly v0.3 receipts. v0.2 receipts (`output_hash` field)
+    /// are rejected with a diagnostic pointing at `lyra bind` so a
+    /// caller cannot accidentally treat a v0.2 receipt as v0.3.
     pub fn from_json(s: &str) -> Result<Self, String> {
         let mut p = Parser::new(s);
         p.skip_ws();
@@ -88,7 +98,7 @@ impl Receipt {
         p.skip_ws();
         p.expect_char(',')?;
         p.skip_ws();
-        let output_hash = p.expect_field("output_hash")?;
+        let output_cid = p.expect_field_v03_output_cid()?;
         p.skip_ws();
         p.expect_char(',')?;
         p.skip_ws();
@@ -99,7 +109,7 @@ impl Receipt {
         Ok(Self {
             computation_id,
             input,
-            output_hash,
+            output_cid,
             runtime,
         })
     }
@@ -239,7 +249,10 @@ impl<'a> Parser<'a> {
                     let rest = &self.bytes[self.pos..];
                     let s = std::str::from_utf8(rest)
                         .map_err(|e| format!("invalid utf-8 inside string: {e}"))?;
-                    let ch = s.chars().next().ok_or_else(|| "utf-8 boundary".to_string())?;
+                    let ch = s
+                        .chars()
+                        .next()
+                        .ok_or_else(|| "utf-8 boundary".to_string())?;
                     out.push(ch);
                     self.pos += ch.len_utf8();
                 }
@@ -262,6 +275,27 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         self.parse_string()
     }
+
+    /// v0.3-specific: parse the third field and require it is `output_cid`.
+    /// If the receipt is a v0.2 form carrying `output_hash`, emit a
+    /// diagnostic pointing at `lyra bind` for migration.
+    fn expect_field_v03_output_cid(&mut self) -> Result<String, String> {
+        let k = self.parse_string()?;
+        if k == "output_hash" {
+            return Err(
+                "this receipt is v0.2 (carries `output_hash`); v0.3 receipts use \
+                 `output_cid`. Re-bind with `lyra bind <SKILL.md> <descriptor.json>`."
+                    .into(),
+            );
+        }
+        if k != "output_cid" {
+            return Err(format!("expected key \"output_cid\", got {:?}", k));
+        }
+        self.skip_ws();
+        self.expect_char(':')?;
+        self.skip_ws();
+        self.parse_string()
+    }
 }
 
 #[cfg(test)]
@@ -272,8 +306,8 @@ mod tests {
         Receipt {
             computation_id: "test".into(),
             input: input.into(),
-            output_hash: "deadbeef".into(),
-            runtime: "hermes-lyra/0.2.0+uor-foundation/0.4.2".into(),
+            output_cid: "bafkreitestplaceholder0000000000000000000000000000000000000000".into(),
+            runtime: "hermes-lyra/0.3.0+uor-foundation/0.4.2".into(),
         }
     }
 
@@ -282,7 +316,7 @@ mod tests {
         let r2 = Receipt::from_json(&json).expect("parse");
         assert_eq!(r.computation_id, r2.computation_id);
         assert_eq!(r.input, r2.input);
-        assert_eq!(r.output_hash, r2.output_hash);
+        assert_eq!(r.output_cid, r2.output_cid);
         assert_eq!(r.runtime, r2.runtime);
     }
 
@@ -325,13 +359,13 @@ mod tests {
 
     #[test]
     fn rejects_missing_field() {
-        let bad = r#"{"computation_id":"x","input":"y","output_hash":"z"}"#;
+        let bad = r#"{"computation_id":"x","input":"y","output_cid":"z"}"#;
         assert!(Receipt::from_json(bad).is_err());
     }
 
     #[test]
     fn rejects_wrong_field_order() {
-        let bad = r#"{"input":"y","computation_id":"x","output_hash":"z","trace_b64":"w"}"#;
+        let bad = r#"{"input":"y","computation_id":"x","output_cid":"z","runtime":"w"}"#;
         assert!(Receipt::from_json(bad).is_err());
     }
 
@@ -339,5 +373,16 @@ mod tests {
     fn rejects_unterminated_string() {
         let bad = r#"{"computation_id":"x"#;
         assert!(Receipt::from_json(bad).is_err());
+    }
+
+    #[test]
+    fn rejects_v02_receipts_with_explicit_message() {
+        // A v0.2 receipt body — `output_hash` instead of `output_cid`.
+        let v02 = r#"{"computation_id":"skill_interface_hash","input":"{}","output_hash":"deadbeef","runtime":"hermes-lyra/0.2.0+uor-foundation/0.4.2"}"#;
+        let err = Receipt::from_json(v02).expect_err("v0.2 receipts must be rejected");
+        assert!(
+            err.contains("v0.2") && err.contains("lyra bind"),
+            "rejection must point users at lyra bind; got: {err}"
+        );
     }
 }

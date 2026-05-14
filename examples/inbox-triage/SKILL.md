@@ -33,8 +33,8 @@ contract: {"content_hash":"bc72ae24c1227cdf5c74eb5a26b527569e3f91177875b322aca3c
       }},
       {"name": "priority", "shape": {"type": "u8", "max_bytes": 1}}
     ]
-  },"references":[],"version":"0.1.0"}
-proof:    {"protocol":"hermes-lyra/0.2","spec_uri":"https://github.com/ZiriaLabs/hermes-lyra","output_hash":"5f4716e508019e84a57349e708f3da78fc588948877f7e082a24f8e30a00a1e4","runtime":"hermes-lyra/0.2.0+uor-foundation/0.4.2"}
+  },"references":[],"schema":"bafkr4iepmp73holgr6qox5kq5zh24e5h64yu32kgx6thfqwm33k6rrktju","version":"0.1.0"}
+proof:    {"protocol":"hermes-lyra/0.3","output_cid":"bafkr4icrowvqin7ssusit3stumyugd5evjcskmlazdbj66neibm6ot3vey","runtime":"hermes-lyra/0.3.0+uor-foundation/0.4.2"}
 ---
 
 # inbox-triage

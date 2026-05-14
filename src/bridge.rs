@@ -76,26 +76,21 @@ pub fn scaffold_md_from_descriptor(descriptor_json: &str) -> Result<String, Stri
 /// implementation-specific assumptions) makes verification independent
 /// of any single reference implementation: any party that has cached
 /// the `lyra/0.1` spec can re-derive the proof.
-pub const LYRA_PROTOCOL: &str = "hermes-lyra/0.2";
+pub const LYRA_PROTOCOL: &str = "hermes-lyra/0.3";
 
-/// A self-verifying proof embedded alongside a descriptor. Four fields:
-///   * `protocol`    — names the rule set (e.g. `"hermes-lyra/0.2"`).
-///   * `spec_uri`    — informational URI pointing at the canonical
-///                     repo. Lets a **cold-start** agent (one with
-///                     zero prior knowledge of Lyra) bootstrap: fetch
-///                     the rules and the reference implementation.
-///                     NOT authoritative — verifiers ignore it; the
-///                     authoritative identifier is `protocol`. The
-///                     URI is a hint; any mirror serving the same
-///                     repo content is equally valid.
-///   * `output_hash` — BLAKE3-256 over canonical descriptor bytes.
-///   * `runtime`     — which implementation produced this; lets a
-///                     verifier confirm byte-exact reproducibility.
+/// A self-verifying proof embedded alongside a descriptor. Three fields:
+///   * `protocol`   — names the rule set (e.g. `"hermes-lyra/0.3"`).
+///                    Authoritative version identifier.
+///   * `output_cid` — multibase string-form CIDv1 (raw codec, BLAKE3-256)
+///                    over the SKILL.md envelope: every byte of the file
+///                    EXCEPT this `proof:` line. Re-derivable by any
+///                    verifier without knowing the protocol internals.
+///   * `runtime`    — which implementation produced this; gated at verify
+///                    time. Not folded into the CID itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddedProof {
     pub protocol: String,
-    pub spec_uri: String,
-    pub output_hash: String,
+    pub output_cid: String,
     pub runtime: String,
 }
 
@@ -310,30 +305,109 @@ pub fn bind_descriptor_to_md(
     //    spec a derived attestation.
     let descriptor_json = rewrite_content_hash(descriptor_json, &body_hash_hex)?;
 
-    // 3. Validate the (post-rewrite) descriptor through the typed
-    //    path. Catches malformed input with a clean error.
-    let receipt = crate::cli_api::score("skill_interface_hash", &descriptor_json)
+    // 3. Validate the descriptor through the typed path. Catches
+    //    malformed input with a clean error. We discard the receipt's
+    //    `output_cid` — under v0.3 envelope semantics, the file's CID
+    //    is computed from the whole SKILL.md, not from the descriptor
+    //    alone.
+    crate::cli_api::score("skill_interface_hash", &descriptor_json)
         .map_err(|e| format!("descriptor invalid: {e}"))?;
+
+    // 4. Splice the contract + a PLACEHOLDER proof line into the
+    //    frontmatter. The proof line is always stripped before the CID
+    //    is computed, so the placeholder's content does not affect the
+    //    envelope bytes — only its presence on a single line matters.
+    let placeholder_proof = format!(
+        r#"{{"protocol":"{}","output_cid":"PENDING","runtime":"{}"}}"#,
+        LYRA_PROTOCOL,
+        json_escape(&crate::LYRA_RUNTIME_IDENT.to_string()),
+    );
+    let staged = splice_frontmatter_keys(md, descriptor_json.trim(), &placeholder_proof);
+
+    // 5. Strip the proof line, hash the rest, wrap as CIDv1+raw+blake3.
+    //    This is THE seal — every byte outside the proof line participates.
+    let envelope_bytes = strip_proof_line(&staged)
+        .ok_or_else(|| "internal: spliced markdown is missing proof line".to_string())?;
+    let envelope_cid = crate::cid::Cid::from_raw_blob(envelope_bytes.as_bytes()).to_string();
+
+    // 6. Build the final proof JSON with the real CID, and substitute
+    //    it into the staged markdown. We replace the placeholder line
+    //    (cheap text op) rather than re-splicing — the proof line is
+    //    always last in the frontmatter, so the surrounding bytes are
+    //    untouched. Since the proof line is what `strip_proof_line`
+    //    removes, this substitution does NOT change the envelope CID.
     let proof = EmbeddedProof {
         protocol: LYRA_PROTOCOL.to_string(),
-        spec_uri: crate::LYRA_SPEC_URI.to_string(),
-        output_hash: receipt.output_hash.clone(),
-        runtime: receipt.runtime.clone(),
+        output_cid: envelope_cid.clone(),
+        runtime: crate::LYRA_RUNTIME_IDENT.to_string(),
     };
-
-    // 4. Build the proof JSON line. Field order: protocol, spec_uri,
-    //    output_hash, runtime.
-    let proof_json = format!(
-        r#"{{"protocol":"{}","spec_uri":"{}","output_hash":"{}","runtime":"{}"}}"#,
+    let final_proof_json = format!(
+        r#"{{"protocol":"{}","output_cid":"{}","runtime":"{}"}}"#,
         proof.protocol,
-        json_escape(&proof.spec_uri),
-        proof.output_hash,
+        proof.output_cid,
         json_escape(&proof.runtime),
     );
+    let upgraded = staged.replace(&placeholder_proof, &final_proof_json);
 
-    // 5. Splice `contract:` and `proof:` into the frontmatter.
-    let upgraded = splice_frontmatter_keys(md, descriptor_json.trim(), &proof_json);
     Ok((upgraded, proof))
+}
+
+/// Strip the single frontmatter `proof:` line from `md`, returning the
+/// remaining bytes as a new String. Returns `None` if no proof line is
+/// found.
+///
+/// The strip rule (spec § Content addressing):
+///   - Scan only the frontmatter block, between the opening `---\n` and
+///     the next `---\n` at column 0.
+///   - Find exactly one line starting with literal bytes `proof:`.
+///   - Remove that line and the single trailing `\n` that terminates it.
+///   - Multi-line proof values (YAML continuation) are rejected.
+pub fn strip_proof_line(md: &str) -> Option<String> {
+    let bytes = md.as_bytes();
+    // Frontmatter must open with `---\n` (or `---\r\n`; we reject CR per
+    // strict-parse rules, but the strip is byte-level so we just look
+    // for the LF terminator).
+    if !bytes.starts_with(b"---\n") {
+        return None;
+    }
+    // Find the closing `---\n` at column 0. Scan line by line so we
+    // honour line boundaries exactly.
+    let mut line_start = 4; // past the opening "---\n"
+    let mut proof_start: Option<usize> = None;
+    let mut proof_end: Option<usize> = None;
+    while line_start < bytes.len() {
+        let line_end = bytes[line_start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| line_start + p)
+            .unwrap_or(bytes.len());
+        let line = &bytes[line_start..line_end];
+        // Closing fence — frontmatter ends here.
+        if line == b"---" {
+            break;
+        }
+        // Match `proof:` at column 0.
+        if line.starts_with(b"proof:") {
+            if proof_start.is_some() {
+                // Multiple proof lines — ambiguous. Reject by returning
+                // None; the caller surfaces a parse error.
+                return None;
+            }
+            proof_start = Some(line_start);
+            // Consume the trailing newline as part of the proof line.
+            proof_end = Some((line_end + 1).min(bytes.len()));
+        }
+        // Step to the next line.
+        if line_end >= bytes.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    let (start, end) = (proof_start?, proof_end?);
+    let mut out = String::with_capacity(bytes.len() - (end - start));
+    out.push_str(&md[..start]);
+    out.push_str(&md[end..]);
+    Some(out)
 }
 
 /// Insert (or replace) the `contract:` and `proof:` keys in a SKILL.md's
@@ -514,7 +588,7 @@ fn rewrite_content_hash(descriptor_json: &str, new_hex: &str) -> Result<String, 
     // value tokens (preserves nested object/array structure exactly).
     let key_order = [
         "content_hash", "effects", "input_shape", "name",
-        "output_shape", "references", "version",
+        "output_shape", "references", "schema", "version",
     ];
     let mut out = String::with_capacity(descriptor_json.len());
     out.push('{');
@@ -522,6 +596,15 @@ fn rewrite_content_hash(descriptor_json: &str, new_hex: &str) -> Result<String, 
     for k in &key_order {
         let v_raw = if *k == "content_hash" {
             format!(r#""{new_hex}""#)
+        } else if *k == "schema" {
+            // Schemas-first: every bound descriptor declares its schema
+            // on the wire. If the author omitted it, we inject the v1
+            // CID — equivalent to what the builder defaults to, but
+            // visible on disk so the SKILL.md is self-describing.
+            match map.get(*k) {
+                Some(v) => v.clone(),
+                None => format!(r#""{}""#, crate::schema::LYRA_SKILL_SCHEMA_V1_CID),
+            }
         } else {
             match map.get(*k) {
                 Some(v) => v.clone(),
@@ -681,11 +764,10 @@ pub fn verify_embedded_proof(md: &str) -> Result<VerifyOutcome, String> {
 const MAX_VERIFY_CACHE: usize = 4096;
 
 fn verify_embedded_proof_inner(md: &str) -> Result<VerifyOutcome, String> {
-    // Read the descriptor and proof from the frontmatter. Missing either
-    // collapses to NoProof — the artifact is not self-verifying.
-    let Some(descriptor_json) = extract_frontmatter_contract(md) else {
-        return Ok(VerifyOutcome::NoProof);
-    };
+    // Read the proof from the frontmatter. Missing → NoProof (artifact
+    // is not self-verifying). We do NOT require a `contract:` key — the
+    // envelope CID seals every byte outside the proof line, so a SKILL.md
+    // with only a body and a proof is also a valid (if degenerate) skill.
     let Some(proof_json) = extract_frontmatter_proof(md) else {
         return Ok(VerifyOutcome::NoProof);
     };
@@ -696,51 +778,46 @@ fn verify_embedded_proof_inner(md: &str) -> Result<VerifyOutcome, String> {
             Some(s) => unquote_str(s)?,
             None => LYRA_PROTOCOL.to_string(),
         },
-        spec_uri: match proof_map.get("spec_uri") {
-            Some(s) => unquote_str(s)?,
-            None => crate::LYRA_SPEC_URI.to_string(),
-        },
-        output_hash: unquote_str(
-            proof_map.get("output_hash").ok_or("proof missing output_hash")?,
+        output_cid: unquote_str(
+            proof_map
+                .get("output_cid")
+                .ok_or("proof missing output_cid")?,
         )?,
         runtime: unquote_str(proof_map.get("runtime").ok_or("proof missing runtime")?)?,
     };
-    // (1) Protocol identifier.
+
+    // (1) Protocol identifier gate.
     if proof.protocol != LYRA_PROTOCOL {
         return Ok(VerifyOutcome::UnsupportedProtocol {
             proof: proof.protocol,
             verifier: LYRA_PROTOCOL.to_string(),
         });
     }
-    // (2) Substrate compatibility.
+
+    // (2) Substrate compatibility gate.
     if !crate::runtime_is_compatible(&proof.runtime) {
         return Ok(VerifyOutcome::SubstrateIncompatible {
             proof: proof.runtime,
             verifier: crate::LYRA_RUNTIME_IDENT.to_string(),
         });
     }
-    // (3) Re-derive the descriptor hash.
-    let receipt = crate::cli_api::score("skill_interface_hash", &descriptor_json)
-        .map_err(|e| format!("re-deriving hash: {e}"))?;
-    if receipt.output_hash != proof.output_hash {
+
+    // (3) THE SEAL. Strip the proof line, hash the rest as a raw blob,
+    //     wrap as CIDv1+raw+blake3, compare. This is the entire integrity
+    //     check — every byte outside the proof line participates.
+    let envelope = strip_proof_line(md).ok_or_else(|| {
+        "internal: extract_frontmatter_proof found a proof but strip_proof_line did not"
+            .to_string()
+    })?;
+    let expected_cid = crate::cid::Cid::from_raw_blob(envelope.as_bytes()).to_string();
+    if expected_cid != proof.output_cid {
         return Ok(VerifyOutcome::Mismatch);
     }
-    // (4) Body-hash binding. The descriptor's `content_hash` is
-    //     BLAKE3-256 of the skill body; `bind_descriptor_to_md` enforces
-    //     this at bind time. Re-derive and compare — if an attacker
-    //     edited the SKILL.md prose after binding, the body hash
-    //     diverges and we surface a Mismatch.
+
+    // Body bytes (for callers that want to display them) is the descriptor-less
+    // skill body. The envelope CID has already attested every byte; this is
+    // purely for downstream rendering.
     let body = extract_skill_body(md);
-    let body_hash_hex = hex_lower(blake3::hash(body_canonical_bytes(&body)).as_bytes());
-    let descriptor_map = crate::computations::parse_json(&descriptor_json)
-        .map_err(|e| format!("descriptor parse: {e}"))?;
-    let claimed_hash = descriptor_map
-        .get("content_hash")
-        .ok_or("descriptor missing content_hash")?;
-    let claimed_hash_unquoted = unquote_str(claimed_hash)?;
-    if claimed_hash_unquoted != body_hash_hex {
-        return Ok(VerifyOutcome::Mismatch);
-    }
     Ok(VerifyOutcome::Valid { body })
 }
 
@@ -834,7 +911,7 @@ mod tests {
         let md = fresh_md();
         let (md1, p1) = bind_descriptor_to_md(&md, VALID_DESCRIPTOR).unwrap();
         let (_md2, p2) = bind_descriptor_to_md(&md1, VALID_DESCRIPTOR).unwrap();
-        assert_eq!(p1.output_hash, p2.output_hash);
+        assert_eq!(p1.output_cid, p2.output_cid);
         assert_eq!(p1.runtime, p2.runtime);
     }
 

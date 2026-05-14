@@ -104,10 +104,10 @@ fn roundtrip_merkle_manifest() {
 
 #[test]
 fn roundtrip_skill_reference_resolve() {
-    // S4: pinned references `<name>@<64-hex>` must match both name and hash.
-    let http_hash = "aa".repeat(32);
+    // References are bare CIDv1 strings. Manifest entries are {name, cid}.
+    let http_cid = "bafkr4idtjwypfi4rrrhkzciuvexfxehrv4zgvnylzxgr7lhuyimcfdmene";
     let input = format!(
-        r#"{{"skill":{{"name":"web-search","version":"1.0.0","input_shape":{{"type":"string","max_bytes":256}},"output_shape":{{"type":"string","max_bytes":4096}},"effects":["web_read"],"references":["http-client@{http_hash}"],"content_hash":"10b5b44710b5b44710b5b44710b5b44710b5b44710b5b44710b5b44710b5b447"}},"manifest":[{{"name":"http-client","content_hash":"{http_hash}"}}]}}"#
+        r#"{{"skill":{{"name":"web-search","version":"1.0.0","input_shape":{{"type":"string","max_bytes":256}},"output_shape":{{"type":"string","max_bytes":4096}},"effects":["web_read"],"references":["{http_cid}"],"content_hash":"10b5b44710b5b44710b5b44710b5b44710b5b44710b5b44710b5b44710b5b447"}},"manifest":[{{"name":"http-client","cid":"{http_cid}"}}]}}"#
     );
     assert_roundtrip("skill_reference_resolve", "skill_reference_resolve", &input);
 }
@@ -115,15 +115,18 @@ fn roundtrip_skill_reference_resolve() {
 // ---- tamper detection ----
 
 #[test]
-fn tamper_output_hash_is_rejected() {
+fn tamper_output_cid_is_rejected() {
     let input = r#"{"name":"x","version":"1.0.0","input_shape":{"type":"u8","max_bytes":1},"output_shape":{"type":"u8","max_bytes":1},"effects":["none"],"references":[],"content_hash":"10b5b44710b5b44710b5b44710b5b44710b5b44710b5b44710b5b44710b5b447"}"#;
     let receipt = tmp_receipt("tamper");
     score("skill_interface_hash", input, &receipt);
 
     let raw = std::fs::read_to_string(&receipt).expect("read receipt");
-    let key = "\"output_hash\":\"";
-    let start = raw.find(key).expect("output_hash field present") + key.len();
+    let key = "\"output_cid\":\"";
+    // Skip the multibase prefix 'b' and tamper the first base32 digest char.
+    let start = raw.find(key).expect("output_cid field present") + key.len() + 1;
     let mut bytes: Vec<u8> = raw.into_bytes();
+    // XOR within the base32 alphabet: pick a different valid base32 char.
+    // Original is in [a-z2-7]; flipping the low bit of 'a' → 'b', etc.
     bytes[start] ^= 0x01;
     std::fs::write(&receipt, &bytes).expect("write tampered receipt");
 

@@ -7,17 +7,24 @@ fn blake3_hash(input: &[u8]) -> Vec<u8> {
     blake3::hash(input).as_bytes().to_vec()
 }
 
-/// BLAKE3-256 of `(runtime_ident || 0x00 || computation_label || 0x00 || bytes)`.
-/// This folds the runtime identifier into every computation hash so seals
-/// produced under different substrate versions are visibly distinct.
+/// **DEPRECATED in v0.3 internal API** — kept as a thin wrapper that
+/// delegates to [`crate::cid::Cid::from_canonical_input`] so the digest
+/// bytes returned here match the digest inside a v0.3 `Cid`.
+///
+/// This wrapper exists during the v0.2 → v0.3 in-tree migration so the
+/// five computation functions (`skill_interface_hash`,
+/// `skill_reference_resolve`, `merkle_manifest`, `compose_interfaces`,
+/// `next_generation`) can keep their current `Vec<u8>` return type
+/// while the callers (`cli_api::score`, `bridge.rs`, `tripwire.rs`)
+/// migrate to `Cid` over a few patches.
+///
+/// Under v0.3 framing the bytes that are actually hashed are:
+/// `LYRA_PROTOCOL_ID_PREFIX || 0x00 || label || 0x00 || bytes`.
+/// The runtime ident is NOT folded in any more.
 fn runtime_hash(label: &str, bytes: &[u8]) -> Vec<u8> {
-    let mut h = blake3::Hasher::new();
-    h.update(crate::LYRA_RUNTIME_IDENT.as_bytes());
-    h.update(&[0x00]);
-    h.update(label.as_bytes());
-    h.update(&[0x00]);
-    h.update(bytes);
-    h.finalize().as_bytes().to_vec()
+    crate::cid::Cid::from_canonical_input(label, bytes)
+        .digest()
+        .to_vec()
 }
 
 /// Dispatch a computation by id.
@@ -68,14 +75,22 @@ fn skill_interface_hash(input: &str) -> Result<Vec<u8>, String> {
     Ok(runtime_hash("skill_interface_hash", &canonical))
 }
 
-/// Resolves pinned skill references against a manifest.
+/// Resolves content-addressed skill references against a manifest.
 ///
-/// Input: JSON object `{ "skill": <interface>, "manifest": [{name, content_hash}] }`.
+/// Input: JSON object `{ "skill": <interface>, "manifest": [{name, cid}] }`.
 ///
-/// **(S4)** Each reference is a *pinned* `<name>@<64-hex>` string. The
-/// resolver requires that **both** the name and the content_hash match
-/// a manifest entry — name-only matches are not accepted. Also rejects
-/// manifests containing duplicate (name, content_hash) pairs.
+/// Each reference in `skill.references[]` is a CIDv1 string (the same
+/// form `lyra cid` emits — multibase 'b' + base32-lower + raw codec +
+/// blake3-256 hash). The resolver walks each reference and confirms the
+/// manifest knows about it. Matching is by CID alone; the manifest's
+/// `name` field is metadata for the caller, not part of the match.
+///
+/// Why CID-only matching?
+/// - The CID is the address. Two manifest entries with the same CID
+///   under different names are the *same object* — there's nothing to
+///   disambiguate. (We still reject duplicate (name, cid) pairs as a
+///   curation hygiene check, but a name-only collision is allowed if
+///   the CIDs differ — those are different objects.)
 fn skill_reference_resolve(input: &str) -> Result<Vec<u8>, String> {
     let map = parse_json(input)?;
     let skill_str = map.get("skill").ok_or("missing skill")?;
@@ -89,11 +104,16 @@ fn skill_reference_resolve(input: &str) -> Result<Vec<u8>, String> {
     let mut manifest_entries: Vec<(String, String)> = Vec::with_capacity(manifest.len());
     for entry in &manifest {
         let name = get_str(entry, "name")?.to_string();
-        let hash = get_str(entry, "content_hash")?.to_string();
-        let pair = (name, hash);
+        let cid = get_str(entry, "cid")?.to_string();
+        // Validate the manifest's CID at intake — a malformed CID in the
+        // manifest is unresolvable by construction, so reject early.
+        crate::cid::Cid::parse(&cid).map_err(|e| {
+            format!("manifest entry {name:?}: cid {cid:?} is not a valid CIDv1: {e:?}")
+        })?;
+        let pair = (name, cid);
         if manifest_entries.contains(&pair) {
             return Err(format!(
-                "duplicate manifest entry: name={:?} content_hash={:?}",
+                "duplicate manifest entry: name={:?} cid={:?}",
                 pair.0, pair.1
             ));
         }
@@ -102,20 +122,14 @@ fn skill_reference_resolve(input: &str) -> Result<Vec<u8>, String> {
 
     let mut resolved: Vec<String> = Vec::new();
     for r in refs {
-        // S4: split the pinned reference into (name, content_hash).
-        let (ref_name, ref_hash) = r.split_once('@').ok_or_else(|| {
-            format!("reference {r:?} must have form 'name@<64-hex>'")
+        // The reference is a bare CIDv1 string.
+        crate::cid::Cid::parse(&r).map_err(|e| {
+            format!("reference {r:?} is not a valid CIDv1: {e:?}")
         })?;
-        if ref_hash.len() != 64 {
-            return Err(format!(
-                "reference {r:?}: hash must be 64 hex chars, got {}",
-                ref_hash.len()
-            ));
-        }
         let mut found = false;
-        for (m_name, m_hash) in &manifest_entries {
-            if m_name == ref_name && m_hash == ref_hash {
-                resolved.push(m_hash.clone());
+        for (_m_name, m_cid) in &manifest_entries {
+            if m_cid == &r {
+                resolved.push(m_cid.clone());
                 found = true;
                 break;
             }
@@ -126,14 +140,11 @@ fn skill_reference_resolve(input: &str) -> Result<Vec<u8>, String> {
     }
 
     // **AUDIT #5**: explicit length-prefixed canonical bytes for the
-    // resolved list. Prior code used `format!("{:?}", resolved)` whose
-    // output is governed only by Rust's `Debug` impl — the spec makes
-    // no stability guarantee, so a toolchain bump could silently flip
-    // the canonical hash. Length-prefixed encoding is the same pattern
-    // used in `SkillDescriptor::canonicalize` and is fully spec-pinned.
+    // resolved list. Same encoding as before — toolchain-independent.
     //
     // Format: `u32(count) || for each item: u32(len) || bytes`.
-    let mut canonical = Vec::with_capacity(64 + resolved.iter().map(|s| s.len() + 4).sum::<usize>());
+    let mut canonical =
+        Vec::with_capacity(64 + resolved.iter().map(|s| s.len() + 4).sum::<usize>());
     canonical.extend_from_slice(&(resolved.len() as u32).to_le_bytes());
     for item in &resolved {
         canonical.extend_from_slice(&(item.len() as u32).to_le_bytes());
@@ -273,7 +284,57 @@ pub(crate) fn unquote_json_string(token: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// Maximum nesting depth (object+array) accepted by the strict JSON parser.
+///
+/// **Why bounded.** Unbounded nesting opens a DOS vector and, worse, an
+/// acceptance-set ambiguity: a 10-million-level descriptor parses to the
+/// same canonical form as a shallow one, but two implementations might
+/// blow their stacks at different depths and therefore disagree about
+/// which inputs are valid. The protocol pins one number; everyone rejects
+/// the same byte strings.
+///
+/// 32 is well above the deepest legitimate descriptor (shapes top out at
+/// 4–6 nesting levels in real workloads) and well below any reasonable
+/// stack limit.
+pub(crate) const MAX_NESTING_DEPTH: u32 = 32;
+
 pub(crate) fn parse_json(input: &str) -> Result<std::collections::HashMap<String, String>, String> {
+    parse_json_with_depth(input, 0)
+}
+
+/// Internal entry that tracks recursion depth. `parse_json` is the
+/// only public caller; `get_map`, `parse_list`, and `parse_object_array`
+/// route through `parse_json_with_depth` with their current depth + 1.
+pub(crate) fn parse_json_with_depth(
+    input: &str,
+    depth: u32,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    if depth > MAX_NESTING_DEPTH {
+        return Err(format!(
+            "strict_json: nesting depth exceeds {MAX_NESTING_DEPTH}"
+        ));
+    }
+    // Strict canonical form: reject byte sequences that some lenient
+    // JSON parsers accept but that create acceptance-set ambiguity for
+    // content-addressed receipts. Each rejection here is justified in
+    // docs/specification.md § Strict Parsing.
+    if input.starts_with('\u{FEFF}') {
+        return Err("strict_json: leading BOM (U+FEFF) forbidden".into());
+    }
+    // Whitespace in canonical JSON is the ASCII set {' ', '\t', '\n'}.
+    // A lone CR is rejected — it's a Windows-line-ending artifact, not
+    // a canonical separator, and accepting it lets a tampered file with
+    // changed line endings re-canonicalize to the same hash on some
+    // platforms but not others.
+    let mut prev_was_lf = true; // start-of-input behaves like start-of-line
+    for c in input.chars() {
+        if c == '\r' {
+            return Err("strict_json: bare carriage return (\\r) forbidden in canonical form".into());
+        }
+        prev_was_lf = c == '\n';
+    }
+    let _ = prev_was_lf;
+
     let mut map = std::collections::HashMap::new();
     // Strip exactly ONE opening `{` and ONE closing `}`. The previous
     // `trim_*_matches` form stripped repeated braces, which silently ate
@@ -286,13 +347,50 @@ pub(crate) fn parse_json(input: &str) -> Result<std::collections::HashMap<String
         .ok_or_else(|| format!("expected JSON object opening, got {trimmed:?}"))?
         .strip_suffix('}')
         .ok_or_else(|| format!("expected JSON object closing, got {trimmed:?}"))?;
-    for pair in split_json_pairs(body) {
+    // Strict: an object body that ends in `,` (after trimming) has a
+    // trailing comma. `split_json_pairs` silently absorbs the trailing
+    // empty segment because it only pushes when start < body.len(),
+    // so the comma never produces an "empty pair" to catch later —
+    // we have to detect it here.
+    if body.trim_end().ends_with(',') {
+        return Err("strict_json: trailing comma in object".into());
+    }
+    let pairs = split_json_pairs(body);
+    for pair in &pairs {
+        // Strict: empty pair (which is what split produces from a
+        // trailing-comma object like `{"a":1,}`) is rejected.
+        if pair.trim().is_empty() {
+            return Err("strict_json: trailing comma or empty pair in object".into());
+        }
         let (k, v) = split_key_value(pair)
             .ok_or_else(|| format!("malformed pair (no top-level colon): {pair}"))?;
-        let k = k.trim().trim_matches('"');
+        // Strict: a JSON key MUST be a quoted string. Bare identifiers
+        // (`name:"x"`) are JavaScript-flavoured, not canonical JSON.
+        let k_trim = k.trim();
+        let k_str = k_trim.strip_prefix('"').and_then(|s| s.strip_suffix('"')).ok_or_else(|| {
+            format!("strict_json: object key must be a quoted string, got {k_trim}")
+        })?;
         let v = v.trim();
-        if map.insert(k.to_string(), v.to_string()).is_some() {
-            return Err(format!("duplicate key: {k}"));
+        // Strict: when a value is itself an object, recurse with
+        // depth+1 to enforce the global nesting cap. We do this lazily
+        // only when we see an object/array value so the depth bookkeeping
+        // stays cheap for flat descriptors.
+        if let Some(inner) = v.strip_prefix('{') {
+            if inner.ends_with('}') {
+                // Re-parse for its side-effect of depth checking; we
+                // don't store the parsed inner here — downstream callers
+                // (e.g. get_map) will re-parse when they consume it,
+                // and the outer error from here covers the depth limit.
+                parse_json_with_depth(v, depth + 1)?;
+            }
+        } else if let Some(inner) = v.strip_prefix('[') {
+            if inner.ends_with(']') {
+                // Same depth-check for arrays of objects/arrays.
+                parse_list_with_depth(v, depth + 1)?;
+            }
+        }
+        if map.insert(k_str.to_string(), v.to_string()).is_some() {
+            return Err(format!("duplicate key: {k_str}"));
         }
     }
     Ok(map)
@@ -421,10 +519,53 @@ fn parse_list(s: &str) -> Result<Vec<String>, String> {
     // the canonical unquote so e.g. `"a\\nb"` returns `a\nb` correctly
     // rather than `a\\nb` verbatim.
     let mut out = Vec::new();
-    for piece in split_json_pairs(inner) {
+    let pieces = split_json_pairs(inner);
+    for piece in &pieces {
+        // Strict: trailing comma in arrays produces an empty piece;
+        // reject it the same way `parse_json_with_depth` does for objects.
+        if piece.trim().is_empty() {
+            return Err("strict_json: trailing comma or empty element in array".into());
+        }
         out.push(unquote_json_string(piece)?);
     }
     Ok(out)
+}
+
+/// Depth-tracking array parser used by `parse_json_with_depth` to walk
+/// into nested array values. We only need to check that the contained
+/// objects/arrays don't exceed the global nesting cap — the actual
+/// element values are reparsed by their typed consumers.
+pub(crate) fn parse_list_with_depth(s: &str, depth: u32) -> Result<(), String> {
+    if depth > MAX_NESTING_DEPTH {
+        return Err(format!(
+            "strict_json: nesting depth exceeds {MAX_NESTING_DEPTH}"
+        ));
+    }
+    let trimmed = s.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .ok_or_else(|| format!("expected JSON array, got {trimmed:?}"))?
+        .strip_suffix(']')
+        .ok_or_else(|| format!("expected JSON array, got {trimmed:?}"))?;
+    if inner.trim().is_empty() {
+        return Ok(());
+    }
+    for piece in split_json_pairs(inner) {
+        let p = piece.trim();
+        if p.is_empty() {
+            return Err("strict_json: trailing comma or empty element in array".into());
+        }
+        if let Some(after) = p.strip_prefix('{') {
+            if after.ends_with('}') {
+                parse_json_with_depth(p, depth + 1)?;
+            }
+        } else if let Some(after) = p.strip_prefix('[') {
+            if after.ends_with(']') {
+                parse_list_with_depth(p, depth + 1)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_list_of_maps(s: &str) -> Result<Vec<std::collections::HashMap<String, String>>, String> {
@@ -693,8 +834,9 @@ pub fn next_generation_check(input: &str) -> Result<Vec<u8>, NextGenerationError
     // S8: output = BLAKE3(b"EVOLVED" || 0x00 || parent_output_hash[32] || 0x00 || child_interface_hash[32]).
     // `parent.output_hash` is hex-encoded in the envelope; decode to 32
     // raw bytes before feeding the hasher.
-    let parent_hash_bytes: [u8; 32] = hex_decode_32(&parent_receipt.output_hash)
-        .map_err(|e| NGE::ParentReceiptInvalid(format!("output_hash decode: {e}")))?;
+    let parent_hash_bytes: [u8; 32] = crate::cid::Cid::parse(&parent_receipt.output_cid)
+        .map(|c| *c.digest())
+        .map_err(|e| NGE::ParentReceiptInvalid(format!("output_cid parse: {e}")))?;
     let mut buf = Vec::with_capacity(7 + 1 + 32 + 1 + 32);
     buf.extend_from_slice(b"EVOLVED");
     buf.push(0);
@@ -708,19 +850,6 @@ pub fn next_generation_check(input: &str) -> Result<Vec<u8>, NextGenerationError
 /// String-erased wrapper used by the string-keyed `run` dispatcher.
 fn next_generation(input: &str) -> Result<Vec<u8>, String> {
     next_generation_check(input).map_err(|e| e.to_string())
-}
-
-fn hex_decode_32(s: &str) -> Result<[u8; 32], String> {
-    if s.len() != 64 {
-        return Err(format!("expected 64 hex chars, got {}", s.len()));
-    }
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        let byte = u8::from_str_radix(&s[2*i..2*i+2], 16)
-            .map_err(|_| format!("invalid hex at byte {i}"))?;
-        out[i] = byte;
-    }
-    Ok(out)
 }
 
 // ------------------------------------------------------------------
@@ -738,7 +867,7 @@ pub fn descriptor_from_json(json: &str) -> Result<crate::descriptor::SkillDescri
     // unsigned-fields-of-influence.
     const KNOWN: &[&str] = &[
         "content_hash", "effects", "input_shape", "name",
-        "output_shape", "references", "version",
+        "output_shape", "references", "schema", "version",
     ];
     for key in map.keys() {
         if !KNOWN.contains(&key.as_str()) {
@@ -748,6 +877,9 @@ pub fn descriptor_from_json(json: &str) -> Result<crate::descriptor::SkillDescri
     let name = get_str(&map, "name")?;
     let version = get_str(&map, "version")?;
     let content_hash = get_str(&map, "content_hash")?;
+    // Schema field is optional on the wire (defaults to v1 in the builder),
+    // but the builder rejects anything other than recognized values.
+    let schema = get_str(&map, "schema").ok();
 
     let input_shape_map = get_map(&map, "input_shape")?;
     let output_shape_map = get_map(&map, "output_shape")?;
@@ -770,6 +902,9 @@ pub fn descriptor_from_json(json: &str) -> Result<crate::descriptor::SkillDescri
         .content_hash_hex(content_hash)
         .input_shape(input_shape)
         .output_shape(output_shape);
+    if let Some(s) = schema {
+        b = b.schema(s);
+    }
     for e in effects {
         b = b.effect(e);
     }

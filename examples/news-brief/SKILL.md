@@ -1,6 +1,6 @@
 ---
 name: news-brief
-contract: {"content_hash":"609da164c8501de0db10b53db9529b1a8b9485b61a4ce700ade6638ae2128fdb","effects":["web_read", "llm"],"input_shape":{
+contract: {"content_hash":"f27640ecc5f34a6107bcd6e0906026d499ff9784afe3d817c45ef823e6554a4e","effects":["web_read", "llm"],"input_shape":{
     "type": "structured",
     "fields": [
       {"name": "sources", "shape": {
@@ -28,10 +28,10 @@ contract: {"content_hash":"609da164c8501de0db10b53db9529b1a8b9485b61a4ce700ade66
       }}
     ]
   },"references":[
-    "url-fetch@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "llm-classify@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-  ],"version":"0.1.0"}
-proof:    {"protocol":"hermes-lyra/0.2","spec_uri":"https://github.com/ZiriaLabs/hermes-lyra","output_hash":"4d9dd671bb3aa265a6c3897ca3ece66be86e8c3c83bb5dcc33108c6680e84ae5","runtime":"hermes-lyra/0.2.0+uor-foundation/0.4.2"}
+    "bafkr4idtjwypfi4rrrhkzciuvexfxehrv4zgvnylzxgr7lhuyimcfdmene",
+    "bafkr4ihjjst6s2zemp7qmufq7c26dg67lqnm3wruko2mdnaeqtpppktbo4"
+  ],"schema":"bafkr4iepmp73holgr6qox5kq5zh24e5h64yu32kgx6thfqwm33k6rrktju","version":"0.1.0"}
+proof:    {"protocol":"hermes-lyra/0.3","output_cid":"bafkr4iamifowvi5ocop6seo72v72g2evub6pgikd7q67zccgk4uiqjuv34","runtime":"hermes-lyra/0.3.0+uor-foundation/0.4.2"}
 ---
 
 # news-brief
@@ -48,20 +48,20 @@ Takes a list of source URLs and a look-back window in hours. Returns a list of i
 
 ## Why a Lyra contract
 
-The load-bearing field is `references`. Each entry has the form `<name>@<64-hex-content-hash>`:
+The load-bearing field is `references`. Each entry is the envelope CID of another SKILL.md — the same string `lyra cid <file>` emits:
 
 ```json
 "references": [
-  "url-fetch@aaaaaa...aaaa",
-  "llm-classify@bbbbbb...bbbb"
+  "bafkr4idtjwypfi4rrrhkzciuvexfxehrv4zgvnylzxgr7lhuyimcfdmene",
+  "bafkr4ihjjst6s2zemp7qmufq7c26dg67lqnm3wruko2mdnaeqtpppktbo4"
 ]
 ```
 
 Three properties this gives the multi-channel pipeline:
 
-1. **Reproducibility across machines.** A teammate cloning the workflow gets the *same brief* because both sub-skills are pinned by content hash. Name-only matches are rejected by `skill_reference_resolve` (R-S4 in the protocol).
-2. **Opt-in upgrades.** When the user wants to move to `llm-classify@cccc...`, they update one line in `references` and the brief's `content_hash` changes — a visible event in any Git diff or audit log.
-3. **Manifest-rooted snapshot.** `lyra score merkle_manifest` over `[news-brief, url-fetch, llm-classify]` produces a single 32-byte Merkle root that summarizes the entire skill graph for a given day. Two users on different continents who share the root are running the same brief; they can compare without comparing each skill.
+1. **Reproducibility across machines.** A teammate cloning the workflow gets the *same brief* because each sub-skill is pinned by its envelope CID. Two SKILL.md files with the same prose but different contracts have different CIDs; substitution is impossible without changing the reference.
+2. **Opt-in upgrades.** When the user wants to move to a different `llm-classify` version, they paste the new file's CID into `references` and the brief's `content_hash` changes — a visible event in any Git diff or audit log.
+3. **Universal addressing.** Each CID is a multiformats-standard reference. Any tool that can resolve a CID (kubo, an HTTP gateway, a content store) can resolve a Lyra reference — no dialect, no parallel naming scheme, no `@` prefix.
 
 ## How Hermes uses it
 

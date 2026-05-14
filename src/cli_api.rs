@@ -29,11 +29,16 @@ use crate::receipt::Receipt;
 /// rejected by the computation.
 pub fn score(computation_id: &str, input: &str) -> Result<Receipt, String> {
     let output = computations::run(computation_id, input)?;
-    let output_hash = hex_encode(&output);
+    let digest: [u8; 32] = output
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("internal: computation digest length {} != 32", output.len()))?;
+    let output_cid = crate::cid::Cid::from_blake3_digest_unchecked(digest, crate::cid::Codec::Json)
+        .to_string();
     Ok(Receipt {
         computation_id: computation_id.to_string(),
         input: input.to_string(),
-        output_hash,
+        output_cid,
         runtime: crate::LYRA_RUNTIME_IDENT.to_string(),
     })
 }
@@ -41,9 +46,9 @@ pub fn score(computation_id: &str, input: &str) -> Result<Receipt, String> {
 /// Outcome of a verify call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyOutcome {
-    /// `output_hash` matches a fresh re-execution.
-    Ok { output_hash: String },
-    /// The receipt's `output_hash` did not match a fresh re-execution.
+    /// `output_cid` matches a fresh re-execution.
+    Ok { output_cid: String },
+    /// The receipt's `output_cid` did not match a fresh re-execution.
     /// Returned as a value (rather than `Err`) so callers can
     /// distinguish forged content from I/O or parse failures.
     ContentMismatch {
@@ -52,7 +57,7 @@ pub enum VerifyOutcome {
     },
 }
 
-/// Verify a receipt: re-run the computation and compare the output hash.
+/// Verify a receipt: re-run the computation and compare the output CID.
 ///
 /// `computation_id` and `input` must match the values stored in the
 /// receipt; a receipt cannot be re-bound to a different pair.
@@ -82,16 +87,21 @@ pub fn verify(
         ));
     }
 
-    // Content integrity: re-run computation, compare hashes.
+    // Content integrity: re-run computation, compare CIDs.
     let output = computations::run(computation_id, input)?;
-    let expected_hash = hex_encode(&output);
+    let digest: [u8; 32] = output
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("internal: computation digest length {} != 32", output.len()))?;
+    let expected_cid = crate::cid::Cid::from_blake3_digest_unchecked(digest, crate::cid::Codec::Json)
+        .to_string();
 
-    if expected_hash == receipt.output_hash {
-        Ok(VerifyOutcome::Ok { output_hash: expected_hash })
+    if expected_cid == receipt.output_cid {
+        Ok(VerifyOutcome::Ok { output_cid: expected_cid })
     } else {
         Ok(VerifyOutcome::ContentMismatch {
-            expected: expected_hash,
-            actual_in_receipt: receipt.output_hash.clone(),
+            expected: expected_cid,
+            actual_in_receipt: receipt.output_cid.clone(),
         })
     }
 }

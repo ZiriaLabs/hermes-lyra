@@ -41,7 +41,8 @@ A Lyra descriptor is a JSON object with exactly these seven fields, in canonical
 | `input_shape` | shape | The shape of the single input value the skill accepts. |
 | `name` | string | 1–64 ASCII characters: lowercase letters, digits, hyphens. No leading/trailing hyphen. No consecutive hyphens. Matches the [agentskills.io](https://agentskills.io/specification) `name` rules. |
 | `output_shape` | shape | The shape of the single output value the skill produces. |
-| `references` | array | Zero or more `name` strings naming dependencies. |
+| `references` | array | Zero or more CIDv1 strings naming dependencies. |
+| `schema` | string | CIDv1 of the schema this descriptor instantiates. v1 recognizes exactly one value, [`LYRA_SKILL_SCHEMA_V1_CID`](#schemas-first-v030). Anything else is rejected as `unsupported_schema`. See [Schemas-first](#schemas-first-v030). |
 | `version` | string | SemVer `major.minor.patch`, each component a 32-bit unsigned integer. |
 
 #### content_hash binding
@@ -132,17 +133,214 @@ Two descriptors are equivalent iff their canonical forms are byte-identical. Can
 7. `content_hash` is lowercase hex.
 8. `name` is lowercase (enforced by the field constraint, not canonicalization).
 
+## Strict parsing (v0.2.1+)
+
+Canonicalization defines the **output** of a parse. Strict parsing defines the **acceptance set** — the set of byte sequences a conforming implementation may parse. Two implementations must agree on both. Where canonicalization tells you that `{"a":1,"b":2}` and `{"b":2,"a":1}` produce the same hash, strict parsing tells you which byte sequences are accepted at all.
+
+The protocol pins one acceptance set. Any conforming implementation MUST reject the following byte sequences with an error and MUST NOT silently treat them as equivalent to a valid form:
+
+1. **Trailing commas** — `{"a":1,}` or `["a",]`. Different lenient parsers absorb trailing commas at different points; pinning a single acceptance set means one CID per file across every implementation.
+2. **Unquoted object keys** — `{name:"x"}`. JSON keys MUST be quoted strings; JavaScript identifier keys are out of scope.
+3. **Leading byte-order mark** — `U+FEFF` at the start of input. Some editors silently inject a BOM; the receipt envelope rejects it so a re-saved file does not change its CID.
+4. **Bare carriage returns** — a `\r` byte anywhere in the input. Canonical JSON uses `\n` for newlines; `\r\n` and lone `\r` are Windows-line-ending artefacts and produce different bytes for the same logical document.
+5. **Excessive nesting depth** — any object or array nested more than **32 levels** deep. Unbounded nesting is both a DOS vector and an acceptance-set ambiguity (different implementations blow their stacks at different depths). The cap is global across objects and arrays combined.
+6. **Duplicate object keys** — `{"a":1,"a":2}`. Already-rejected; restated here for completeness.
+
+These six rules are independent of canonicalization: they tighten what bytes are *accepted as input*, but they do not change the canonical *output* for any input that was already valid under v0.2.0. The same v0.2.0 pinned hashes therefore continue to verify under v0.2.1 — strict mode is a pure tightening of the acceptance set.
+
+The `MAX_NESTING_DEPTH` constant lives in `src/computations.rs`; conforming implementations MUST use the same value.
+
+## Content addressing (v0.3.0+)
+
+A SKILL.md is a **self-sealing envelope**. The entire file — frontmatter, contract, prose, whitespace — except for a single `proof:` line participates in one CID that is embedded back into the proof line. Any byte change anywhere in the file changes the CID; tampering with the proof line itself is detected because the (stripped) bytes still hash to the original CID.
+
+There is exactly one CID per file. The protocol identifier becomes `hermes-lyra/0.3`. v0.2 receipts return `unsupported_protocol`.
+
+### The envelope rule
+
+```
+envelope_bytes   =  SKILL.md  minus the single frontmatter line beginning with `proof:`
+                                (and the single trailing newline that line consumes)
+output_cid       =  CIDv1(codec=raw, hash=blake3-256,
+                          digest=BLAKE3-256(envelope_bytes))
+```
+
+That's the only rule. No protocol framing inside the hash, no domain separators, no canonicalization beyond what already lives in the SKILL.md on disk. A Python or Go verifier needs three things: read the file, strip the proof line, BLAKE3 the rest.
+
+**Canonical position of the proof line.** Exactly one line, at column 0 inside the frontmatter (between the opening `---` and closing `---`), beginning with literal bytes `proof:`. Multi-line proof values are rejected at parse time.
+
+**Why raw codec (0x55).** A SKILL.md is markdown-with-frontmatter, not JSON. Raw is the multiformats-correct codec for opaque file content. A kubo node accepts the same bytes via `ipfs add --raw-leaves --cid-version=1 --hash=blake3` and returns the same CID.
+
+### Frontmatter proof block (v0.3)
+
+```yaml
+proof: {"protocol":"hermes-lyra/0.3","output_cid":"bafy…","runtime":"hermes-lyra/0.3.1+uor-foundation/0.4.2"}
+```
+
+Exactly three fields, in that order, on one line. `spec_uri` from v0.2 is dropped — informational duplication of `protocol`, which is the authoritative identifier.
+
+### Verification flow
+
+```
+1. Parse: locate the frontmatter proof line (between `---` separators,
+   column 0, prefix `proof:`). MUST be exactly one. MUST be single-line JSON.
+2. Strip: remove that line + its trailing `\n` → envelope_bytes.
+3. Hash: expected_cid = CIDv1(raw, blake3, BLAKE3(envelope_bytes)).
+4. Compare: expected_cid == proof.output_cid → valid; else mismatch.
+5. Runtime gate: proof.runtime ∈ {LYRA_RUNTIME_IDENT} ∪ COMPATIBLE_RUNTIMES
+                 else → unsupported_protocol.
+```
+
+Steps 2-4 are the seal. Step 5 is the runtime compatibility check.
+
+### What is sealed
+
+Every byte of the file outside the single proof line:
+- frontmatter keys (`name:`, `version:`, the `contract:` JSON, any author-added keys)
+- the closing `---` separator
+- the prose body
+- trailing whitespace and newlines
+
+### What is not sealed
+
+- The proof line itself (it's what's stripped).
+- The `contract:` value is hashed *as text inside the envelope* — its canonical form is not enforced. The author's frontmatter pretty-printing is preserved verbatim, and the CID seals exactly the byte sequence the author wrote. Two SKILL.md files with semantically equivalent but textually different `contract:` JSON have different CIDs. This is the right behaviour for a file-level envelope.
+
+### Receipt schema (unchanged from earlier v0.3 sketches)
+
+```json
+{
+  "computation_id": "skill_interface_hash",
+  "input":          "<exact bytes the computation consumed>",
+  "output_cid":     "bafy…",
+  "runtime":        "hermes-lyra/0.3.1+uor-foundation/0.4.2"
+}
+```
+
+For receipts emitted by primitive computations (e.g., direct `lyra score`), `output_cid` is the CID over the framed canonical computation input, identical to the previous v0.3 design. For SKILL.md envelopes, `output_cid` is the file-level CID. The two contexts are disjoint — a receipt has a `computation_id`, a SKILL.md is just bytes.
+
+### IPFS interoperability
+
+```
+$ ipfs add --raw-leaves --cid-version=1 --hash=blake3 examples/inbox-triage/SKILL.md
+added bafkr... 1234 bytes
+
+$ lyra cid examples/inbox-triage/SKILL.md
+bafkr...
+```
+
+The two CIDs match — the file-level CID is exactly what kubo computes when configured with `raw-leaves + cid-version=1 + blake3`. No custom multicodec, no protocol-specific wrapper.
+
+### What this enables
+
+1. **Drop-in IPFS publication.** `ipfs add` a SKILL.md, get back a CID that `lyra verify` accepts without modification.
+2. **Single-CID identity.** A skill is one byte sequence, one CID. No duality between file-CID and contract-CID.
+3. **Forks are different files with different CIDs.** Editing the contract, the body prose, or even a single character of frontmatter produces a different CID. Curators publish a registry as `[{name, cid}, ...]`; users follow whichever curator's CID they trust.
+4. **Cross-implementation determinism.** Any future Python/Go implementation that strips the proof line and BLAKE3s the rest produces an identical CID. Multiformats-standard, no UOR runtime needed at the verifier.
+
+### UOR anchoring
+
+The CID itself is a multiformats-standard value, not a UOR-shaped value. UOR anchoring lives one layer down:
+
+- The descriptor inside the `contract:` field uses `ConstrainedTypeShape`-projected leaf types (`LyraU8`, …, `LyraString`, `LyraBytes` from `src/shape.rs`).
+- The BLAKE3 hasher used to compute the CID implements `uor_foundation::enforcement::Hasher` — registered with UOR even though BLAKE3 itself is not a UOR construct.
+- The runtime ident declares its UOR substrate version (`+uor-foundation/<version>`) at compile time, visible in the proof line.
+
+The CID seals UOR-typed content via a UOR-registered hasher. The address itself is multiformats. This is the correct factoring: UOR governs the types and the hashing primitive; multiformats governs the addressing.
+
 ## JSON-LD `@context`
 
-For the JSON-LD interchange format, the canonical context vocabulary is:
+For the JSON-LD interchange format, Lyra binds two namespaces:
 
 ```
-https://lyra-protocol.org/ontology/v0.1/
+schema: https://schema.org/                       (universal vocabulary)
+lyra:   https://lyra-protocol.org/ontology/v0.1/  (Lyra-specific vocabulary)
 ```
 
-Shape IRIs are namespaced under `https://lyra-protocol.org/shapes/v0.1/{u8,u16,u32,u64,string,bytes,structured,list}`.
+A skill descriptor renders as a `schema:SoftwareApplication`. Universal fields (`schema:name`, `schema:softwareVersion`) borrow from schema.org so search-engine ingestors, RDF triplestores, and JSON-LD-aware retrieval pipelines understand the output natively. Lyra-specific fields (`lyra:schema`, `lyra:contentHash`, `lyra:inputShape`, `lyra:outputShape`, `lyra:effects`, `lyra:references`) stay under the `lyra:` namespace because schema.org has no native vocabulary for them.
 
-JSON-LD is an **edge format**. The typed descriptor is the source of truth. JSON-LD never enters the trust path; it exists only for cross-framework interchange.
+```json
+{
+  "@context": { "schema": "https://schema.org/", "lyra": "https://lyra-protocol.org/ontology/v0.1/" },
+  "@type": "schema:SoftwareApplication",
+  "schema:name": "inbox-triage",
+  "schema:softwareVersion": "0.1.0",
+  "lyra:schema":      "bafkr4iepmp73holgr6qox5kq5zh24e5h64yu32kgx6thfqwm33k6rrktju",
+  "lyra:contentHash": "…",
+  "lyra:inputShape":  { "type": "structured", "fields": [...] },
+  "lyra:outputShape": { "type": "structured", "fields": [...] },
+  "lyra:effects":     ["llm"],
+  "lyra:references":  []
+}
+```
+
+This is **Depth-1 schema.org alignment** — vocabulary borrow at the descriptor boundary. The typed shape grammar (everything under `lyra:inputShape` / `lyra:outputShape`) is not aliased; it's Lyra's own type system, not a schema.org subgraph. Depth 3 (schema.org as our meta-schema) is deliberately not done — that would trade the compile-time guarantees of `ConstrainedTypeShape` for schema.org's loose `expectedType` model.
+
+Shape IRIs (under `lyra:inputShape` / `lyra:outputShape`) are namespaced under `https://lyra-protocol.org/shapes/v0.1/{u8,u16,u32,u64,string,bytes,structured,list}`.
+
+JSON-LD is an **edge format**. The typed descriptor is the source of truth, the envelope CID is the trust path. JSON-LD never enters the trust path; it exists only for cross-framework interchange and search-engine discoverability.
+
+## Schemas-first (v0.3.0+)
+
+A schema in Lyra is a CID-addressed object. Every skill descriptor names the schema it instantiates by embedding that schema's CID in its `schema` field. Schemas are not magic: they are themselves UOR-typed declarations addressable as canonical bytes.
+
+### The v1 root schema
+
+`lyra-skill/v1` is the root schema for all v0.3 skill descriptors. It is declared in Rust as a `ConstrainedTypeShape` with a discriminating `Affine` rule over per-slot indicators (sum of 8 coefficients = 8, bias = −8), which the UOR kernel grinds to `Ok(Grounded<T>)` at preflight. An adversary publishing a "schema" whose constraint system is inconsistent — e.g. `0 = bias≠0` — is rejected with `PipelineFailure::ShapeViolation` and cannot stand in for a real schema.
+
+The schema's identity is its CID over the canonical bytes:
+
+```
+canonical_bytes = {
+  "constraints": [{"bias":-8,"coefficient_count":8,"coefficients":[1,1,1,1,1,1,1,1],"type":"affine"}],
+  "iri":         "https://lyra-protocol.org/schemas/v0.1/skill",
+  "kind":        "lyra-skill",
+  "site_count":  8,
+  "version":     "0.1.0"
+}
+schema_cid      = CIDv1(codec=raw, hash=blake3-256, BLAKE3-256(canonical_bytes))
+```
+
+For v1 the pinned value is:
+
+```
+LYRA_SKILL_SCHEMA_V1_CID = "bafkr4iepmp73holgr6qox5kq5zh24e5h64yu32kgx6thfqwm33k6rrktju"
+```
+
+### Two-layer validation
+
+Schema enforcement is intentionally split:
+
+1. **UOR kernel attests *constraint-system consistency*.** When a schema declaration is ground through `pipeline::run::<LyraSkillSchemaV1, _, LyraHasher>`, the kernel walks the `Affine` constraints via `preflight_feasibility` and `run_reduction_stages`. A self-contradicting schema cannot ground; a well-formed one does. This is the load-bearing UOR-anchored half.
+
+2. **The Rust binding layer attests *value satisfaction*.** When a `SkillDescriptor` is built, the builder requires its `schema` field to equal a recognized CID (currently exactly one: the v1 CID). Mismatches surface as `DescriptorBuildError::UnsupportedSchema` at build time and as `unsupported_schema` at verify time (typed outcome, not a hard error).
+
+Separation of concerns is honest: the kernel grinds the rules, the binding layer grinds the values.
+
+### Why the schema field is in the envelope
+
+Adding `schema` participates in canonicalization and therefore in the envelope CID. This is intentional. A SKILL.md that silently changed schemas (or claimed a schema it does not satisfy) would compute a different envelope CID; verifiers detect the drift at the same gate that catches body or descriptor mutations. The schema declaration is **transitively sealed** by the same envelope rule as everything else outside the `proof:` line.
+
+### Future schemas
+
+`lyra-skill/v1` is pinned. Future schemas (e.g. `lyra-skill/v2`) will introduce new CIDs and new accepted values in the builder. Old SKILL.md files continue to validate against `v1`; new schemas are additive, not replacements. Schema upgrades are version-aware and CID-addressed, not implicit.
+
+## Proof strategies (v0.3.0+)
+
+Lyra's computations classify under UOR foundation's `ProofStrategy` ontology. Each `computation_id` maps to exactly one strategy IRI:
+
+| `computation_id`            | UOR `ProofStrategy` | IRI                                          |
+|-----------------------------|---------------------|----------------------------------------------|
+| `skill_interface_hash`      | `Computation`       | `https://uor.foundation/proof/Computation`   |
+| `skill_reference_resolve`   | `Computation`       | `https://uor.foundation/proof/Computation`   |
+| `compose_interfaces`        | `Composition`       | `https://uor.foundation/proof/Composition`   |
+| `next_generation`           | `Computation`       | `https://uor.foundation/proof/Computation`   |
+
+`compose_interfaces` is the only Lyra computation that proves by *composition of sub-identities* (producer's output shape composes with consumer's input shape — categorical composition). The other three are decidable runtime checks; `Computation` is the honest UOR classification.
+
+`next_generation` is deliberately **not** classified as `Composition` even though a *chain* of refinements would compose categorically. A single refinement step is one decidable R1–R5 check, not a composition of two sub-proofs.
+
+These IRIs are **informational, not trust-bearing**. The envelope CID is the trust path. The strategy IRIs exist for cross-framework JSON-LD consumers who want to grep "which UOR strategy backs this computation?" against a stable URI. Lookups are exposed via [`proof_strategy::proof_strategy_iri`](https://github.com/ZiriaLabs/hermes-lyra) in the reference implementation; unknown IDs default to `Computation` (the conservative classification).
 
 ## Relationship to agentskills.io
 

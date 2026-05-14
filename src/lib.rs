@@ -43,15 +43,31 @@
 /// produced under different substrate versions are *visibly* distinct
 /// rather than silently divergent.
 ///
-/// Format: `hermes-lyra/<crate-version>+uor-foundation/<substrate-version>`.
+/// Format: `hermes-lyra/<protocol-version>+uor-foundation/<substrate-version>`.
 ///
-/// Both versions come from compile-time env vars. The crate version is
-/// `CARGO_PKG_VERSION` (cargo sets this automatically); the substrate
-/// version is `UOR_FOUNDATION_VERSION`, set by `build.rs` from
-/// `Cargo.lock` so the ident tracks the actually-linked substrate by
-/// construction.
+/// The protocol version is `LYRA_PROTOCOL_VERSION` (a const string, NOT
+/// `CARGO_PKG_VERSION`). The crate version moves with every release; the
+/// protocol version moves only when the canonical bytes or acceptance
+/// set change in a way that invalidates older receipts. v0.2.x crate
+/// versions all use protocol version `0.2.0` — strict-parse tightening
+/// in v0.2.1 narrows the acceptance set without shifting canonical bytes
+/// for already-valid input, so the protocol ident is stable across the
+/// 0.2.x crate line. The substrate version is `UOR_FOUNDATION_VERSION`,
+/// set by `build.rs` from `Cargo.lock` so the ident tracks the
+/// actually-linked substrate by construction.
+///
+/// Bump `LYRA_PROTOCOL_VERSION` only when changing this is intended —
+/// every receipt with the previous ident becomes `unsupported_protocol`
+/// under the new build.
+pub const LYRA_PROTOCOL_VERSION: &str = "0.3.0";
+
+/// The protocol identifier prefix folded into every content-addressed
+/// hash. Stable across crate patch releases — moves only on protocol
+/// bumps. Used by [`crate::cid::Cid::from_canonical_input`].
+pub const LYRA_PROTOCOL_ID_PREFIX: &str = "hermes-lyra/0.3";
+
 pub const LYRA_RUNTIME_IDENT: &str = concat!(
-    "hermes-lyra/", env!("CARGO_PKG_VERSION"),
+    "hermes-lyra/", "0.3.0",
     "+uor-foundation/", env!("UOR_FOUNDATION_VERSION"),
 );
 
@@ -75,20 +91,13 @@ pub fn runtime_is_compatible(runtime: &str) -> bool {
     runtime == LYRA_RUNTIME_IDENT || COMPATIBLE_RUNTIMES.contains(&runtime)
 }
 
-/// Canonical repository URI for the Lyra Protocol. Embedded as the
-/// `spec_uri` field of every minted proof so a **cold-start** agent
-/// with zero prior knowledge of Lyra can fetch the rules and the
-/// reference implementation without searching. This is a *hint*, not
-/// authority — verifiers do not consult it during the verify path;
-/// the authoritative identifier remains `protocol`. The URI is
-/// resolvable by any mirror (Git clone, HTTPS fetch, archived
-/// snapshot); no single host gates verification.
-pub const LYRA_SPEC_URI: &str = "https://github.com/ZiriaLabs/hermes-lyra";
-
 
 pub mod shape;
 pub mod version;
 pub mod descriptor;
+pub mod schema;
+pub mod proof_strategy;
+pub mod cid;
 pub mod gate;
 pub mod jsonld;
 pub mod install;

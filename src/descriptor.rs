@@ -54,6 +54,11 @@ pub enum EffectKind {
 /// `SkillDescriptorBuilder::build()`. Immutable once constructed.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SkillDescriptor {
+    /// CID of the schema this descriptor instantiates. v1: must equal
+    /// [`crate::schema::LYRA_SKILL_SCHEMA_V1_CID`]. Anything else surfaces
+    /// as `UnsupportedSchema` during build, and as `unsupported_schema`
+    /// during envelope verification (typed outcome, not a hard error).
+    schema: String,
     name: String,
     version: String,
     content_hash: [u8; 32],
@@ -84,6 +89,11 @@ pub enum DescriptorBuildError {
     /// disagreeing with the canonical attestation ("we do X"). Authors
     /// must pick one or the other.
     ContradictoryNoneEffect,
+    /// The `schema` field is required and must equal a recognized
+    /// schema CID. v1 recognizes only [`crate::schema::LYRA_SKILL_SCHEMA_V1_CID`].
+    /// The wrapped string is the offending value (empty if the field
+    /// was missing entirely).
+    UnsupportedSchema(String),
 }
 
 impl core::fmt::Display for DescriptorBuildError {
@@ -102,6 +112,21 @@ impl core::fmt::Display for DescriptorBuildError {
                     declare `[none]` for a pure function or omit `none` \
                     when other effects are present",
             ),
+            DescriptorBuildError::UnsupportedSchema(s) => {
+                if s.is_empty() {
+                    write!(
+                        f,
+                        "schema field is required; expected schema CID = {}",
+                        crate::schema::LYRA_SKILL_SCHEMA_V1_CID
+                    )
+                } else {
+                    write!(
+                        f,
+                        "unsupported schema {s:?}; this build recognizes only {}",
+                        crate::schema::LYRA_SKILL_SCHEMA_V1_CID
+                    )
+                }
+            }
         }
     }
 }
@@ -114,37 +139,26 @@ pub const MAX_NAME_LENGTH: usize = 64;
 /// - lowercase letters `a-z`, digits `0-9`, or hyphen `-`
 /// - must not start or end with a hyphen
 /// - must not contain consecutive hyphens (`--`)
-/// Validate a **pinned reference** of the form `<name>@<64-hex>`. Pinning
-/// the reference's `content_hash` defends against silent version drift
-/// (S4) — a manifest entry whose name matches but whose content_hash
-/// differs can no longer satisfy this reference.
+/// Validate a **content-addressed reference**. A reference is the envelope
+/// CID of another SKILL.md — the same string `lyra cid` emits, the same
+/// string a multiformats-compliant tool produces over the referenced
+/// file's bytes. The CID *is* the reference; no name prefix.
+///
+/// Why no name?
+/// - The name lives inside the referenced file's frontmatter. Resolving
+///   a CID gets you back the name as a free byproduct, with no parallel
+///   naming scheme to keep in sync.
+/// - `name@<hash>` would be two identifiers for the same thing, two
+///   things to validate, two things to forge. One CID is enough.
+///
+/// Strictness: delegates to `crate::cid::Cid::parse`, which rejects
+/// CIDv0, wrong multibase prefixes, and malformed payloads.
 pub fn validate_reference(r: &str) -> Result<(), DescriptorBuildError> {
-    let (name_part, hash_part) = r.split_once('@').ok_or_else(|| {
+    crate::cid::Cid::parse(r).map(|_| ()).map_err(|e| {
         DescriptorBuildError::InvalidReference(format!(
-            "reference {r:?} must have form 'name@<64-lowercase-hex>'"
+            "reference {r:?} is not a valid CIDv1: {e:?}"
         ))
-    })?;
-    validate_name(name_part).map_err(|e| match e {
-        DescriptorBuildError::EmptyName => DescriptorBuildError::InvalidReference(
-            "reference name must not be empty".into(),
-        ),
-        DescriptorBuildError::InvalidName(msg) => {
-            DescriptorBuildError::InvalidReference(format!("reference {r:?}: {msg}"))
-        }
-        other => other,
-    })?;
-    if hash_part.len() != 64 {
-        return Err(DescriptorBuildError::InvalidReference(format!(
-            "reference {r:?}: hash must be 64 hex chars, got {}",
-            hash_part.len()
-        )));
-    }
-    if !hash_part.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-        return Err(DescriptorBuildError::InvalidReference(format!(
-            "reference {r:?}: hash must be lowercase hex"
-        )));
-    }
-    Ok(())
+    })
 }
 
 pub fn validate_name(name: &str) -> Result<(), DescriptorBuildError> {
@@ -193,6 +207,13 @@ pub struct SkillDescriptorBuilder {
     output_shape: Option<Shape>,
     effects: Vec<EffectKind>,
     references: Vec<String>,
+    /// CID of the schema this descriptor instantiates. v1 builders default
+    /// this to [`crate::schema::LYRA_SKILL_SCHEMA_V1_CID`] when the caller
+    /// does not set it — the only currently-recognized value, so requiring
+    /// it would just be ceremony for the common case. Anything *other*
+    /// than the recognized CID is rejected at `build()` with
+    /// [`DescriptorBuildError::UnsupportedSchema`].
+    schema: Option<String>,
 }
 
 impl SkillDescriptorBuilder {
@@ -207,7 +228,17 @@ impl SkillDescriptorBuilder {
             output_shape: None,
             effects: vec![],
             references: vec![],
+            schema: None,
         }
+    }
+
+    /// Declare which schema this descriptor instantiates. v1 recognizes
+    /// only [`crate::schema::LYRA_SKILL_SCHEMA_V1_CID`]. When unset, the
+    /// builder defaults to that value at `build()` time — the field is
+    /// authoritative on the wire, but ergonomic at construction.
+    pub fn schema(mut self, cid: impl Into<String>) -> Self {
+        self.schema = Some(cid.into());
+        self
     }
 
     pub fn name(mut self, name: impl Into<String>) -> Self {
@@ -328,7 +359,19 @@ impl SkillDescriptorBuilder {
             validate_reference(r)?;
         }
 
+        // Schema field: default to the v1 CID when unset; reject anything
+        // other than recognized values. This is the load-bearing
+        // schemas-first wedge: every descriptor declares its schema.
+        let schema = match self.schema {
+            None => crate::schema::LYRA_SKILL_SCHEMA_V1_CID.to_string(),
+            Some(s) if s == crate::schema::LYRA_SKILL_SCHEMA_V1_CID => s,
+            Some(other) => {
+                return Err(DescriptorBuildError::UnsupportedSchema(other));
+            }
+        };
+
         Ok(SkillDescriptor {
+            schema,
             name,
             version,
             content_hash,
@@ -355,6 +398,7 @@ impl SkillDescriptor {
     pub fn output_shape(&self) -> &Shape { &self.output_shape }
     pub fn effects(&self) -> &[EffectKind] { &self.effects }
     pub fn references(&self) -> &[String] { &self.references }
+    pub fn schema(&self) -> &str { &self.schema }
 
     /// Canonical deterministic bytes of the descriptor. This is what gets
     /// hashed for the content-integrity receipt.
@@ -541,11 +585,17 @@ fn shape_err(msg: &str) -> DescriptorBuildError {
 
 // ---- Canonical encoding ----
 // Deterministic wire format. Simple and verifiable:
-// <name_len><name><version_len><version><content_hash_32>
+// <schema_len><schema><name_len><name><version_len><version><content_hash_32>
 // <input_shape_bytes><output_shape_bytes><effects_bytes><references_bytes>
+//
+// `schema` sits first so future schema-aware parsers can read it before
+// committing to a particular field layout. v1 is the only recognized
+// value but the position is forward-compatible.
 
 fn canonicalize_descriptor(d: &SkillDescriptor) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
+    buf.extend_from_slice(&(d.schema.len() as u32).to_le_bytes());
+    buf.extend_from_slice(d.schema.as_bytes());
     buf.extend_from_slice(&(d.name.len() as u32).to_le_bytes());
     buf.extend_from_slice(d.name.as_bytes());
     buf.extend_from_slice(&(d.version.len() as u32).to_le_bytes());

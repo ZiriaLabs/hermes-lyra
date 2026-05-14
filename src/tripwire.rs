@@ -13,7 +13,7 @@
 //! level computation primitives (`lyra_score`, `skill_verify`) live in
 //! the library and CLI for power users.
 
-use crate::cli_api::{base64_encode, hex_encode, score};
+use crate::cli_api::{base64_encode, score};
 use crate::computations::{next_generation_check, NextGenerationError};
 use crate::receipt::Receipt;
 use crate::refinement::RefinementError;
@@ -104,7 +104,12 @@ pub fn check_refine(parent_input: &str, child_input: &str) -> Result<RefineResul
             let lineage = Receipt {
                 computation_id: "next_generation".to_string(),
                 input: ng_input,
-                output_hash: hex_encode(&output),
+                output_cid: {
+                    let digest: [u8; 32] = output.as_slice().try_into()
+                        .expect("internal: tripwire output is not 32 bytes");
+                    crate::cid::Cid::from_blake3_digest_unchecked(digest, crate::cid::Codec::Json)
+                        .to_string()
+                },
                 runtime: crate::LYRA_RUNTIME_IDENT.to_string(),
             };
             Ok(RefineResult::Promote { lineage_receipt: lineage })
@@ -339,7 +344,8 @@ mod tests {
     fn refine_promotes_legitimate_refinement() {
         match check_refine(V010, V011).unwrap() {
             RefineResult::Promote { lineage_receipt } => {
-                assert_eq!(lineage_receipt.output_hash.len(), 64);
+                assert!(lineage_receipt.output_cid.starts_with('b'));
+                assert!(lineage_receipt.output_cid.len() >= 59);
             }
             other => panic!("expected promote, got {other:?}"),
         }

@@ -129,9 +129,9 @@ fn t2_tampered_middle_generation_rejected() {
     let r2 = score_next_gen(&r1, &pdf_v1_1()).expect("r2");
 
     let mut tampered = r2.clone();
-    let mut bytes = tampered.output_hash.into_bytes();
+    let mut bytes = tampered.output_cid.into_bytes();
     bytes[0] = if bytes[0] == b'0' { b'1' } else { b'0' };
-    tampered.output_hash = String::from_utf8(bytes).unwrap();
+    tampered.output_cid = String::from_utf8(bytes).unwrap();
 
     let err = typed_next_gen_err(&tampered, &pdf_v2());
     assert!(
@@ -427,7 +427,7 @@ fn t11_determinism() {
     let r1 = score_root(&pdf_v1());
     let a = score_next_gen(&r1, &pdf_v1_1()).expect("a");
     let b = score_next_gen(&r1, &pdf_v1_1()).expect("b");
-    assert_eq!(a.output_hash, b.output_hash, "next_generation must be deterministic");
+    assert_eq!(a.output_cid, b.output_cid, "next_generation must be deterministic");
 }
 
 // ---- T12 ---------------------------------------------------------------

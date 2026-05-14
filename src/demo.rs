@@ -74,16 +74,16 @@ pub fn news_brief_descriptor() -> String {
 // any unintended drift.
 // ---------------------------------------------------------------
 
-const EXPECTED_INBOX_TRIAGE_HASH: &str =
-    "5f4716e508019e84a57349e708f3da78fc588948877f7e082a24f8e30a00a1e4";
-const EXPECTED_NEWS_BRIEF_HASH: &str =
-    "4d9dd671bb3aa265a6c3897ca3ece66be86e8c3c83bb5dcc33108c6680e84ae5";
-const EXPECTED_CR_V010_HASH: &str =
-    "95b17c48b9cc85016f37a24ea31b34b7be2fdaed74e83e9e8635ee56debbd2b3";
-const EXPECTED_CR_V011_HASH: &str =
-    "267f30870f82de84a7a448eca444942c35e8ead133109ce2cb6a43b46899587b";
-const EXPECTED_LINEAGE_HASH: &str =
-    "031df957774be7d8aedb7ca4b7f828418778e0b5bcfc4806afdd555753d0b414";
+const EXPECTED_INBOX_TRIAGE_CID: &str =
+    "bagaaihra5rqt4axxoz5v7tcl23igs2vmgdqrpd3upaywakr7fdmrcqwyuuma";
+const EXPECTED_NEWS_BRIEF_CID: &str =
+    "bagaaihrawg3662u3s2o55wmqvz3qizzqxzk32aqf62svh7amkny76q2il6yq";
+const EXPECTED_CR_V010_CID: &str =
+    "bagaaihradmrqy5zpr2cszqhzkuo4alqmkja7k2bpcr53twr5etrvvygtoecq";
+const EXPECTED_CR_V011_CID: &str =
+    "bagaaihrandv5kdnwex6wvc6yfr5shv2ondhuca4rnkrbue75ykz2nkqrm7bq";
+const EXPECTED_LINEAGE_CID: &str =
+    "bagaaihraspjrxx4d4eaofcxid6fljsbvdeqqu34fr5fohhgfj5ogjjbums6a";
 
 // ---------------------------------------------------------------
 // Tripwire demo
@@ -113,7 +113,7 @@ pub fn run_tripwire() -> Result<(), String> {
         .map_err(|e| format!("parent score: {e}"))?;
     println!(
         "  parent output_hash = {dim}{}...{off}",
-        &parent_receipt.output_hash[..16]
+        &parent_receipt.output_cid[..16]
     );
 
     // 2. Good case: v0.1.1.
@@ -126,7 +126,7 @@ pub fn run_tripwire() -> Result<(), String> {
     match score("next_generation", &ng_input_good) {
         Ok(r) => println!(
             "  {grn}OK{off} lineage receipt minted = {dim}{}...{off}\n  {grn}PROMOTE{off} v0.1.1 to production.",
-            &r.output_hash[..16]
+            &r.output_cid[..16]
         ),
         Err(e) => return Err(format!("legitimate refinement was rejected: {e}")),
     }
@@ -167,10 +167,10 @@ pub fn run_tripwire() -> Result<(), String> {
 pub fn run_self_check() -> Result<(), String> {
     let mut passed = 0u32;
     let cases: &[(&str, &str, &str)] = &[
-        ("inbox-triage      / skill_interface_hash", &inbox_triage_descriptor(), EXPECTED_INBOX_TRIAGE_HASH),
-        ("news-brief        / skill_interface_hash", &news_brief_descriptor(),   EXPECTED_NEWS_BRIEF_HASH),
-        ("code-review v0.1.0/ skill_interface_hash", CODE_REVIEW_V010, EXPECTED_CR_V010_HASH),
-        ("code-review v0.1.1/ skill_interface_hash", CODE_REVIEW_V011, EXPECTED_CR_V011_HASH),
+        ("inbox-triage      / skill_interface_hash", &inbox_triage_descriptor(), EXPECTED_INBOX_TRIAGE_CID),
+        ("news-brief        / skill_interface_hash", &news_brief_descriptor(),   EXPECTED_NEWS_BRIEF_CID),
+        ("code-review v0.1.0/ skill_interface_hash", CODE_REVIEW_V010, EXPECTED_CR_V010_CID),
+        ("code-review v0.1.1/ skill_interface_hash", CODE_REVIEW_V011, EXPECTED_CR_V011_CID),
     ];
 
     println!("lyra self-check (runtime: {})", crate::LYRA_RUNTIME_IDENT);
@@ -178,10 +178,10 @@ pub fn run_self_check() -> Result<(), String> {
     for (label, descriptor, expected) in cases {
         let r = score("skill_interface_hash", descriptor)
             .map_err(|e| format!("{label}: score: {e}"))?;
-        if r.output_hash != *expected {
+        if r.output_cid != *expected {
             return Err(format!(
                 "{label}\n  expected: {expected}\n  got:      {}",
-                r.output_hash
+                r.output_cid
             ));
         }
         println!("  PASS  {label}");
@@ -199,10 +199,10 @@ pub fn run_self_check() -> Result<(), String> {
     );
     let lineage = score("next_generation", &ng_input)
         .map_err(|e| format!("lineage score: {e}"))?;
-    if lineage.output_hash != EXPECTED_LINEAGE_HASH {
+    if lineage.output_cid != EXPECTED_LINEAGE_CID {
         return Err(format!(
-            "lineage v0.1.0->v0.1.1\n  expected: {EXPECTED_LINEAGE_HASH}\n  got:      {}",
-            lineage.output_hash
+            "lineage v0.1.0->v0.1.1\n  expected: {EXPECTED_LINEAGE_CID}\n  got:      {}",
+            lineage.output_cid
         ));
     }
     println!("  PASS  lineage v0.1.0->v0.1.1 / next_generation");
@@ -226,7 +226,7 @@ pub fn run_self_check() -> Result<(), String> {
     // Verify roundtrip on one receipt: write, parse, compare.
     let json = parent.to_json();
     let parsed = Receipt::from_json(&json).map_err(|e| format!("receipt roundtrip: {e}"))?;
-    if parsed.output_hash != parent.output_hash {
+    if parsed.output_cid != parent.output_cid {
         return Err("receipt roundtrip mismatch".into());
     }
     println!("  PASS  receipt JSON roundtrip");

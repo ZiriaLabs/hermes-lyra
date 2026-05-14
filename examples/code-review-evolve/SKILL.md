@@ -24,7 +24,7 @@ contract: {"content_hash":"5c603a7cf565940555aeb82164adbcbb633f4587b40b0611a1bd9
       }}
     ]
   },"references":[],"version":"0.1.0"}
-proof:    {"protocol":"hermes-lyra/0.2","spec_uri":"https://github.com/ZiriaLabs/hermes-lyra","output_hash":"091c6a53584c0954865555eddecbedb2a81062257f0bece4da78962eaeab8965","runtime":"hermes-lyra/0.2.0+uor-foundation/0.4.2"}
+proof:    {"protocol":"hermes-lyra/0.3","output_cid":"bafkr4ibiicigxyop4ukv3gkg3d7skryr4e6za6yyy5gcrvfzkzjkakxoum","runtime":"hermes-lyra/0.3.0+uor-foundation/0.4.2"}
 ---
 
 # code-review-evolve

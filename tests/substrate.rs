@@ -23,7 +23,7 @@ const DESCRIPTOR: &str = r#"{"content_hash":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
 fn same_process_two_seals_are_byte_identical() {
     let r1 = score("skill_interface_hash", DESCRIPTOR).expect("r1");
     let r2 = score("skill_interface_hash", DESCRIPTOR).expect("r2");
-    assert_eq!(r1.output_hash, r2.output_hash);
+    assert_eq!(r1.output_cid, r2.output_cid);
     assert_eq!(r1.runtime, r2.runtime);
     assert_eq!(r1.computation_id, r2.computation_id);
     assert_eq!(r1.input, r2.input);
@@ -50,7 +50,7 @@ fn cross_process_seal_matches_in_process_seal() {
 
     let cross = Receipt::read_from_file(receipt_path.to_str().unwrap()).expect("read");
     assert_eq!(
-        local.output_hash, cross.output_hash,
+        local.output_cid, cross.output_cid,
         "cross-process seal must match in-process seal byte-for-byte"
     );
     assert_eq!(local.runtime, cross.runtime);
