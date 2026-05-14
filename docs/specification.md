@@ -168,6 +168,44 @@ Implementations that want smaller wire forms for non-trust use cases (e.g. regis
 
 The `MAX_NESTING_DEPTH` constant lives in `src/computations.rs`; conforming implementations MUST use the same value.
 
+## Empirically-grounded design notes (May 2026)
+
+An audit of all 87 bundled Hermes Agent skills (`NousResearch/hermes-agent` @ `main`, May 2026) was performed to test the hypothesis: *every Hermes skill decomposes to UOR-grounded atomic components used across skills.* The hypothesis is partially confirmed and partially refuted. Findings recorded here so future contributors do not re-litigate them.
+
+**What repeats across skills (atoms worth standardizing):**
+
+| Pattern | Frequency | Standardization opportunity |
+|---|---|---|
+| Frontmatter fields (`name`, `description`, `version`, `platforms`, `metadata.hermes.tags`) | 80–100% | Already standardized by Hermes Agent itself. |
+| Body section headings: `## When to Use` | 40/87 (46%) | Author guidance, compile-time linter candidate. |
+| Body section headings: `## Prerequisites` | 25/87 (29%) | Same. |
+| Body section headings: `## Pitfalls` / `## Common Pitfalls` | 25/87 (29%) | Same. |
+| Body section headings: `## Workflow` | 15/87 (17%) | Same. |
+| External commands shelled out in bash blocks | `python` 40/87, `git`+`curl` 27/87 each, `pip` 26/87 | Auditable: derive effects from body, compare to declared effects. |
+| Effect classes (terminal / file_read / web_read / web_write / file_write / llm) | terminal 87%, file_read 40%, web_read 34%, web_write 36%, file_write 7% | Already part of the Lyra contract. |
+
+**What does NOT repeat across skills (do not try to standardize):**
+
+| Pattern | Evidence |
+|---|---|
+| Procedural body content | Pairwise body 5-gram Jaccard similarity across 87 skills: top pair is 10.5% (`github-code-review` ~ `github-issues`). No clusters of near-duplicate skills. |
+| `metadata.hermes.tags` | 410 unique tags across 502 usages — long-tail, mean tag is used 1.2×. Useless as classifier. |
+| Typed shape primitives | Already-measured: ~30b each, reference overhead (~50b CID) exceeds savings. Catalog wedge does not pay off for current skill set. |
+| `prerequisites.commands` (the upstream-declared field) | Declared by 18% of skills, while 87% of skills actually shell out. The declared field is unreliable — body analysis is the honest source. |
+
+**Implication for future wedges:**
+
+The atoms worth UOR-grounding are NOT shape primitives. They are:
+
+1. **Body section structure** — a compile-time validator that requires `## When to Use` and `## Prerequisites` would catch a real authoring error: a skill missing those sections is genuinely harder for an agent to invoke correctly.
+2. **Effect honesty** — a compile-time linter that scans bash blocks for known commands and compares the derived effect set to the declared `effects` field would catch real R5 refinement violations *at bind time, not at runtime*. The effect-class table above gives the recipe.
+
+Both are concrete, decidable, and would pay for themselves. Neither is shipped today. Recorded here so the work is not lost.
+
+**Implication for "atomic UOR-grounded components used across skills":**
+
+Empirically, the atoms that repeat are *structural and operational*, not *shape-level*. The original Lyra contract layer is correct as designed; the right next axis of standardization is one level up — the body's procedural shape, not the contract's typed shape.
+
 ## Content addressing (v0.3.0+)
 
 A SKILL.md is a **self-sealing envelope**. The entire file — frontmatter, contract, prose, whitespace — except for a single `proof:` line participates in one CID that is embedded back into the proof line. Any byte change anywhere in the file changes the CID; tampering with the proof line itself is detected because the (stripped) bytes still hash to the original CID.
