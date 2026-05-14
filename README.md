@@ -3,7 +3,7 @@
 <!-- PROJECT SHIELDS -->
 [![Stargazers][stars-shield]][stars-url]
 [![Issues][issues-shield]][issues-url]
-[![Apache 2.0][license-shield]][license-url]
+[![MIT][license-shield]][license-url]
 [![Rust][rust-shield]][rust-url]
 [![Tests][tests-shield]](#self-verify)
 
@@ -172,7 +172,7 @@ A skill carries its contract and proof as YAML frontmatter — the same place it
 ---
 name: inbox-triage
 description: Summarize a batch of emails into a fixed, typed brief.
-license: Apache-2.0
+license: MIT
 version: "0.1.0"
 contract: {"content_hash":"...","effects":["llm"],"input_shape":{...},
            "name":"inbox-triage","output_shape":{...},"references":[],
@@ -277,7 +277,7 @@ Architectural changes belong in an Issue first. Any change to canonical bytes, t
 <!-- LICENSE -->
 ## License
 
-Distributed under the Apache License 2.0. See [`LICENSE`](LICENSE) for details.
+Distributed under the MIT License. See [`LICENSE`](LICENSE) for details.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

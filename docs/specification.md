@@ -148,6 +148,24 @@ The protocol pins one acceptance set. Any conforming implementation MUST reject 
 
 These six rules are independent of canonicalization: they tighten what bytes are *accepted as input*, but they do not change the canonical *output* for any input that was already valid under v0.2.0. The same v0.2.0 pinned hashes therefore continue to verify under v0.2.1 — strict mode is a pure tightening of the acceptance set.
 
+## Overhead and size minimization (non-goal)
+
+A typical hybrid Hermes/Lyra `SKILL.md` is ~10% larger than its unsealed Hermes-only counterpart. Of that overhead, the floor is fixed:
+
+- ~167 bytes — the `proof:` line (`protocol` + `output_cid` + `runtime`)
+- ~80 bytes — the `content_hash` field (BLAKE3-256, hex)
+- ~75 bytes — the `schema` CID (CIDv1, base32)
+
+Everything else (~580 bytes) is the typed shape declaration (`input_shape` + `output_shape`), `name`, `version`, `effects`, `references`, and the JSON syntax that glues it together.
+
+The protocol **deliberately does not** compress, alias-encode, or DSL-replace the shape declaration. Three reasons:
+
+1. **Readability is part of the trust model.** A skill author opening a SKILL.md should be able to read the typed contract by eye. Compressed/aliased/DSL'd shapes break that.
+2. **Every additional encoding is a new failure mode.** A zlib-wrapped shape can be corrupted, version-mismatched, or version-skewed against a verifier. The current JSON wire form has none of these failure modes — it parses or it doesn't.
+3. **The overhead is already at or below the floor for the industry-standard trust artifacts it competes with.** A PGP signature is 1-2 KB; a Sigstore bundle is 5-15 KB; a Lyra envelope is ~1 KB.
+
+Implementations that want smaller wire forms for non-trust use cases (e.g. registry indexes) MAY emit alternate serializations (binary canonical form, MessagePack, etc.) **so long as those forms are not embedded in a SKILL.md and never participate in the trust path.** The on-disk SKILL.md format is canonical and stays JSON.
+
 The `MAX_NESTING_DEPTH` constant lives in `src/computations.rs`; conforming implementations MUST use the same value.
 
 ## Content addressing (v0.3.0+)
