@@ -4,6 +4,109 @@ All notable changes to `hermes-lyra` (the reference implementation living at `ly
 
 The protocol identifier in proofs (`proof.protocol`) maps to a particular wire-format/canonical-bytes contract. Bumping the protocol minor invalidates older proofs unless the new version explicitly lists the older one in `COMPATIBLE_RUNTIMES`.
 
+## 0.4.0 (additive — structural lint, no protocol-bytes change)
+
+Adds a textual lint layer (`lyra lint <SKILL.md>` / `skill_lint` over MCP) that
+complements the cryptographic gates. The protocol bytes are unchanged from
+v0.3.0: receipts, CIDs, schema CIDs, JSON-LD output, and proof line format all
+round-trip identically.
+
+**Layering.** `lyra verify` answers "does the proof match the bytes?";
+`lyra lint` answers "does the file follow the conventions other ecosystem
+tooling expects?" Lint runs before bind/verify; failure does not block them.
+
+### Two tiers, empirically calibrated
+
+**Tier-0** (default) — six rules, hard fail with exit code 1. Each rule was
+selected because it passes 100% on every audited skill we could find: the
+87-skill upstream Hermes/agentskills.io corpus *and* every Lyra-native
+descriptor in this repo. Zero false positives on real production content.
+
+1. Frontmatter exists and parses as flat YAML
+2. `name` is a valid Hermes slug — `[a-z0-9][a-z0-9-]*[a-z0-9]`
+3. Body contains at least one H1 (`# `)
+4. Body trimmed length ≥ 200 chars
+5. Body contains at least one H2 (`## `)
+6. Body contains a fenced code block or a list item
+
+**Strict** (`--strict` flag / `strict: true` argument) — advisory rules for
+Hermes-side and Lyra-author conventions that are *not* universal across
+both ecosystems. **Advisory diagnostics never fail the build** — they
+return `status: "advisory"` with exit code 0:
+
+- `description` is present and non-empty (Hermes-side; Lyra-native
+  descriptors omit it because the contract lives in `input_shape` /
+  `output_shape`)
+- `version` is SemVer (`N.N.N[-ident]`)
+- H1 in body contains the `name` slug
+- `platforms` is present and non-empty
+
+### What was empirically *rejected* from Tier-0
+
+The design audit measured candidate rules against 87 upstream skills.
+These rules looked plausible but actually misidentify real, correct
+authoring:
+
+| Rejected rule | Upstream-skill failures | Why excluded |
+|---|---:|---|
+| `name == H1 (slug-normalized)` | 23/87 (26%) | `findmy` vs `# Find My (Apple)`; slug ≠ display title — by design |
+| `prerequisites.commands ⊇ derived effects` | 45/87 (52%) | Upstream convention is to declare nothing; deriving from bash blocks produces noise |
+| `version is SemVer` | 7/87 (8%) | Real skills use `1.0`, `2024-05-13`, etc. |
+| `platforms non-empty` | 1/87 | `teams-meeting-pipeline` is platform-agnostic |
+| `description non-empty` | 0/87 upstream, 3/9 Lyra-native | Hermes-side convention only; Lyra-native skills correctly omit it |
+
+The last row is the load-bearing lesson: a rule that passes 100% on the
+upstream-skill corpus can still be wrong as a hard rule, because the
+Lyra-native skills in *this* repo use a deliberately different shape.
+The audit data forced `description` into the advisory tier.
+
+### Output contract
+
+```
+$ lyra lint skill.md
+{"status":"clean"}                                             # exit 0
+
+$ lyra lint broken.md
+{"status":"lint_failed","rules":[{"id":"name-slug",            # exit 1
+  "tier":"tier0","message":"..."}]}
+
+$ lyra lint hermes-mirror.md --strict
+{"status":"advisory","rules":[{"id":"strict-h1-matches-name",  # exit 0
+  "tier":"strict","message":"H1 \"GitHub PR Workflow\" does not contain slug \"github-pr-workflow\""}]}
+```
+
+Each rule object has stable `id` (machine-readable), `tier`
+(`tier0`|`strict`), and `message` (human-readable).
+
+### MCP surface
+
+`tools/list` now advertises six tools — the existing five gates plus
+`skill_lint`. Input schema:
+
+```json
+{"skill_md": "...", "strict": true}
+```
+
+`strict` defaults to `false`. Output JSON is byte-identical to the CLI's.
+
+### Tests
+
+- New `tests/lint.rs`: end-to-end coverage — all 9 bundled examples
+  pass Tier-0; at least one example raises an advisory under `--strict`;
+  the JSON contract is stable; `--strict` diagnostics never escalate.
+- Linter unit tests in `src/linter.rs`: 12 cases covering each rule's
+  predicate, JSON serialization, slug parser boundaries, SemVer parser
+  boundaries, and Lyra-native vs Hermes-style outcomes.
+- Full suite: **295 tests pass / 0 fail**. `lyra self-check` 7/7. All
+  example SKILL.md files verify under v0.3 cryptographically AND lint
+  clean at Tier-0.
+
+### No protocol break
+
+v0.3.0 receipts, CIDs, schema CIDs, JSON-LD output, and proof-line bytes
+are unchanged. `COMPATIBLE_RUNTIMES` is unchanged. A v0.4 verifier
+reading a v0.3 SKILL.md returns the same result it did before.
+
 ## 0.3.0 (breaking — content addressing + schemas-first)
 
 A SKILL.md is now a **self-sealing envelope**: every byte of the file outside a single `proof:` line participates in one CIDv1 that is embedded back into that proof line. There is exactly one CID per file, and it is recoverable by anyone with the bytes — no protocol-specific framing, no runtime version inside the hash, no descriptor/file CID duality.

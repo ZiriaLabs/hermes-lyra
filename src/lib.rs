@@ -101,14 +101,17 @@ pub mod cid;
 pub mod gate;
 pub mod jsonld;
 pub mod install;
+pub mod skill_install;
 pub mod refinement;
 
 // CLI-facing modules: JSON-string API used by the `lyra` binary.
+pub mod banner;
 pub mod bridge;
 pub mod cli_api;
 pub mod computations;
 pub mod demo;
 pub mod fuse;
+pub mod linter;
 pub mod mcp;
 pub mod receipt;
 pub mod tripwire;

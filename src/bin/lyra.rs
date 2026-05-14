@@ -20,12 +20,14 @@ The five skill-contract checks (each accepts SKILL.md or descriptor JSON):
   lyra merge    <producer> <consumer>          atomic merge of two skills
 
 Tooling:
+  lyra setup                                   one-line install (alias for `lyra install`) + show welcome banner
   lyra install                                 register hermes-lyra in ~/.hermes/config.yaml (mcp_servers.lyra)
   lyra install --uninstall                     remove the registration
   lyra cid      <SKILL.md or descriptor.json>  print content CID (multibase CIDv1)
   lyra publish  <SKILL.md>                     emit [cid, bytes] for IPFS pinning
                                                (stderr=header, stdout=canonical JSON)
   lyra mcp serve                               MCP server over stdio
+  lyra lint     <SKILL.md> [--strict]          structural lint (Tier-0 rules; --strict adds Lyra-author advisory checks)
   lyra demo refine                             built-in self-modification demo
   lyra self-check                              decentralized acceptance suite
   lyra b64-encode <text>                       text codec (replaces GNU base64)
@@ -43,6 +45,112 @@ Exit codes for the five checks:
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    // Zero-arg invocation: show the Hermes-style welcome banner and exit 0.
+    // Anyone typing just `lyra` should land in a familiar, self-describing
+    // splash — not a USAGE wall. USAGE is still available via `lyra --help`.
+    if args.len() == 1 {
+        lyra_ref::banner::print_welcome();
+        return;
+    }
+    if args.len() == 2 && (args[1] == "--help" || args[1] == "-h" || args[1] == "help") {
+        // Explicit help: print the dense USAGE text on stdout (was stderr
+        // historically; help-via-flag is a success, not an error).
+        println!("{USAGE}");
+        return;
+    }
+
+    // `lyra setup` is the Hermes-aligned alias for `lyra install`. It
+    // runs the same idempotent registration flow and then prints the
+    // welcome banner so the user immediately sees what they can do.
+    if args.len() >= 2 && args[1] == "setup" {
+        let uninstall = args[2..]
+            .iter()
+            .any(|a| a == "--uninstall" || a == "--remove");
+        match lyra_ref::install::run(uninstall) {
+            Ok(outcome) => {
+                use lyra_ref::install::InstallOutcome::*;
+                match outcome {
+                    Inserted { config_path, command } => {
+                        println!(
+                            "setup: registered {} in {} (mcp_servers.lyra).",
+                            command.display(), config_path.display()
+                        );
+                    }
+                    Updated { config_path, command } => {
+                        println!(
+                            "setup: pointed mcp_servers.lyra at {} in {}.",
+                            command.display(), config_path.display()
+                        );
+                    }
+                    Unchanged { config_path, command } => {
+                        println!(
+                            "setup: already configured — mcp_servers.lyra in {} points at {}.",
+                            config_path.display(), command.display()
+                        );
+                    }
+                    Removed { config_path } => {
+                        println!("setup: removed mcp_servers.lyra from {}.", config_path.display());
+                    }
+                    NotInstalled { config_path } => {
+                        println!(
+                            "setup: nothing to remove — mcp_servers.lyra was not present in {}.",
+                            config_path.display()
+                        );
+                    }
+                }
+                // After a successful (non-uninstall) setup, also install
+                // the `/lyra` slash-command skill so Hermes CLI/TUI users
+                // get the native command without any extra step.
+                if !uninstall {
+                    match lyra_ref::install::hermes_home() {
+                        Ok(home) => match lyra_ref::skill_install::install(&home) {
+                            Ok(o) => {
+                                use lyra_ref::skill_install::SkillOutcome::*;
+                                match o {
+                                    Installed { path } => println!(
+                                        "setup: installed /lyra slash-command at {}.",
+                                        path.display()
+                                    ),
+                                    Updated { path } => println!(
+                                        "setup: refreshed /lyra slash-command at {}.",
+                                        path.display()
+                                    ),
+                                    Unchanged { path } => println!(
+                                        "setup: /lyra slash-command up-to-date at {}.",
+                                        path.display()
+                                    ),
+                                    Preserved { path } => println!(
+                                        "setup: kept your customised /lyra at {} (user-edit marker present).",
+                                        path.display()
+                                    ),
+                                }
+                            }
+                            Err(e) => eprintln!("setup: skill install failed (non-fatal): {e}"),
+                        },
+                        Err(e) => eprintln!("setup: skill install skipped: {e}"),
+                    }
+                } else {
+                    // On uninstall, also remove the skill so the user gets
+                    // a clean slate.
+                    if let Ok(home) = lyra_ref::install::hermes_home() {
+                        let _ = lyra_ref::skill_install::uninstall(&home);
+                    }
+                }
+                // After a successful (non-uninstall) setup, show the banner
+                // so the user sees the catalog of tools they just installed.
+                if !uninstall {
+                    println!();
+                    lyra_ref::banner::print_welcome();
+                }
+                return;
+            }
+            Err(e) => {
+                eprintln!("setup: {e}");
+                process::exit(2);
+            }
+        }
+    }
 
     // Zero- or one-arg subcommands. These have no IO contract beyond
     // their own output, so they get checked before the score/verify
@@ -161,6 +269,32 @@ fn main() {
             Ok(()) => return,
             Err(e) => { eprintln!("self-check FAILED: {e}"); process::exit(1); }
         }
+    }
+    // lyra lint <SKILL.md> [--strict]
+    //   exit 0  no diagnostics (Tier-0 clean; with --strict, also no advisory)
+    //   exit 0  --strict found advisory diagnostics (status=advisory)
+    //   exit 1  a Tier-0 rule fired (status=lint_failed)
+    //   exit 2  I/O / argument error
+    //
+    // Tier-0 rules were chosen empirically: each passes on 87/87 audited
+    // upstream Hermes skills (May 2026). --strict adds Lyra-author
+    // conventions (SemVer, H1=name, platforms non-empty) that are
+    // intentionally not enforced by default because they would reject
+    // ~26% of real upstream skills.
+    if args.len() >= 3 && args[1] == "lint" {
+        let path = &args[2];
+        let strict = args[3..].iter().any(|a| a == "--strict");
+        let md = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => { eprintln!("read {path}: {e}"); process::exit(2); }
+        };
+        let outcome = lyra_ref::linter::lint(&md, strict);
+        println!("{}", lyra_ref::linter::outcome_to_json(&outcome));
+        process::exit(match outcome {
+            lyra_ref::linter::LintOutcome::Clean             => 0,
+            lyra_ref::linter::LintOutcome::Advisory { .. }   => 0,
+            lyra_ref::linter::LintOutcome::Tier0Failed { .. }=> 1,
+        });
     }
     if args.len() >= 3 && args[1] == "b64-encode" {
         println!("{}", base64_encode(args[2].as_bytes()));

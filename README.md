@@ -130,12 +130,30 @@ No `serde`, no `tokio`, no MCP SDK. JSON parser, base64 codec, JSON-RPC envelope
 
 ### Installation
 
+**One-line install (mirrors the Hermes Agent UX):**
+
 ```bash
-cargo install --locked --git https://github.com/ZiriaLabs/hermes-lyra
-lyra install
+curl -fsSL https://raw.githubusercontent.com/ZiriaLabs/hermes-lyra/main/install.sh | bash
 ```
 
-`lyra install` registers the server in `~/.hermes/config.yaml` (`$HERMES_HOME/config.yaml` if set), pointing `mcp_servers.lyra` at the binary you just installed. Idempotent. Atomic. The config is auto-reloaded on the next save tick — no restart. Remove with `lyra install --uninstall`.
+The script checks for `rustc` / `cargo` / `git`, builds `lyra` from source in release mode, installs it to `$HOME/.local/bin`, and runs `lyra setup`. No sudo. Idempotent — re-run any time to update. Honors `LYRA_REPO_URL`, `LYRA_INSTALL_DIR`, `LYRA_BIN_DIR`, `LYRA_BRANCH` env overrides.
+
+**Manual install via cargo:**
+
+```bash
+cargo install --locked --git https://github.com/ZiriaLabs/hermes-lyra
+lyra setup
+```
+
+`lyra setup` (alias: `lyra install`) is one idempotent command that:
+
+1. Splices `mcp_servers.lyra` into `~/.hermes/config.yaml` (`$HERMES_HOME/config.yaml` if set), pointing at the binary you just installed. Hermes auto-reloads on the next config save tick — no restart.
+2. Drops `~/.hermes/skills/lyra/SKILL.md` so `/lyra` becomes a native slash command in the Hermes CLI/TUI tab-complete.
+3. Prints the welcome panel.
+
+All three operations are byte-comparison idempotent — running `lyra setup` twice is a guaranteed no-op the second time. Atomic writes (write-temp + rename) so a crash mid-install can't leave a half-written file. Remove everything with `lyra setup --uninstall`.
+
+After install, type `lyra` (no args) for the panel, or `/lyra` inside any Hermes session to invoke the slash-command menu.
 
 For any other MCP client (Claude Desktop, Cursor, …) mount the canonical [`mcp.json`](mcp.json):
 
